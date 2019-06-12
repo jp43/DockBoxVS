@@ -1,0 +1,501 @@
+#!/usr/bin/env python
+import os
+import sys
+import shutil
+import argparse
+
+import ConfigParser
+from glob import glob
+
+import pandas as pd
+
+parser = argparse.ArgumentParser(description="Build directories and config files for Virtual Screening (4th stage)")
+
+parser.add_argument('-l',
+    type=str,
+    dest='input_files_l',
+    nargs='+',
+    metavar='FILE',
+    default=['compounds.csv'],
+    help='ligand file(s): .mol2, .csv (default: compounds.csv)')
+
+parser.add_argument('-r',
+    type=str,
+    dest='input_files_r',
+    nargs='+',
+    metavar='FILE',
+    default=['targets.csv'], 
+    help = 'target file(s): .pdb, .csv (default: targets.csv)')
+
+parser.add_argument('-f',
+    type=str,
+    dest='config_file',
+    metavar='FILE',
+    default='config.ini',
+    help='config file: .ini')
+
+parser.add_argument('-build',
+    dest='build',
+    type=int,
+    metavar='INT',
+    default=None,
+    help='Build scripts to be submitted to SLURM scheduler. 0: docking, 1: VS with small number of compounds, 2: VS with large number of compounds')
+
+parser.add_argument('-s',
+    dest='sitecsv',
+    type=str,
+    metavar='FILE',
+    default='sites.csv',
+    help='csvfile with binding sites: .csv (default: sites.csv)')
+
+parser.add_argument('-w',
+    dest='rundir',
+    type=str,
+    default='vs',
+    metavar='DIRECTORY NAME',
+    help='name of directory created for virtual screening')
+
+others = parser.add_argument_group('arguments to build scripts (to be used with -build option)')
+
+others.add_argument('-exclude',
+    dest='exclude',
+    default=None,
+    nargs='+',
+    metavar='NODE',
+    help='Nodes to be excluded. Default: none')
+
+others.add_argument('-p',
+    dest='partition',
+    type=str,
+    default='serial',
+    metavar='NAME',
+    help='SLURM Partition name. Default: serial')
+
+others.add_argument('-t',
+    dest='time',
+    type=str,
+    default='00:05:00',
+    metavar='TIME',
+    help='Approx. time needed for a single job in hh:mm:ss or dd-hh:mm format! Default: 00:05:00')
+
+others.add_argument('-wt',
+    dest='walltime',
+    type=str,
+    default='24:00:00',
+    metavar='WALLTIME',
+    help='Max. walltime in hh:mm:ss or dd-hh:mm format used for slurm scripts (default: 24:00:00)')
+
+def get_number_of_compounds(file_l):
+    suffix, ext = os.path.splitext(file_l)
+    if ext == '.mol2':
+        # count number of lines with @<TRIPOS>ATOM
+        nligs = subprocess.check_output('fgrep -c "@<TRIPOS>ATOM" %s'%file_l, shell=True)
+    else:
+        raise IOError("Extension not recognized for ligand file!")
+
+    nligs = int(nligs)
+    return nligs
+
+def slurm_to_seconds(string):
+
+    # check if days are provided
+    string_s = string.split("-")
+    if len(string_s) == 2:
+        days = int(string_s[0])
+        string_s_s = string_s[1].split(":")
+        if len(string_s_s) == 2:
+            hours = int(string_s_s[0])
+            minutes = int(string_s_s[1])
+        elif len(string_s_s) == 1:
+            hours = int(string_s_s[0])
+            minutes = 0
+        else:
+            raise Exception("SLURM time format %s not recognized"%string)
+        seconds = 0
+    elif len(string_s) == 1:
+        string_s_s = string_s[0].split(":")
+        days = 0
+        if len(string_s_s) == 3:
+            hours = int(string_s_s[0])
+            minutes = int(string_s_s[1])
+            seconds = int(string_s_s[2])
+        elif len(string_s_s) == 2:
+            hours = int(string_s_s[0])
+            minutes = int(string_s_s[1])
+            seconds = 0
+        else:
+            raise Exception("SLURM time format %s not recognized"%string)
+
+    time = days*24*3600 + hours*3600 + minutes*60 + seconds
+    return time
+
+def seconds_to_slurm(time):
+
+    days = time/(24*3600)
+    hours = (time - days*24*3600)/3600 
+    minutes = (time - days*24*3600 - hours*3600)/60
+    seconds = time - days*24*3600 - hours*3600 - minutes*60
+
+    if seconds != 0:
+        minutes += 1
+        seconds = 0
+
+    days_str = str(days)
+    hours_str = str(hours)
+    minutes_str = str(minutes)
+
+    if len(hours_str) == 1:
+        hours_str = '0' + hours_str
+    if len(minutes_str) == 1: 
+        minutes_str = '0' + minutes_str
+
+    if days_str == '0':
+       slurm_time = '%s-%s:%s'%(days_str, hours_str, minutes_str)
+    else:
+       slurm_time = '%s:%s:00'%(hours_str, minutes_str)
+    return slurm_time
+
+args = parser.parse_args()
+locals().update(args.__dict__)
+
+shebang = '#!/bin/bash'
+
+exts = list(set([os.path.splitext(ff)[1] for ff in args.input_files_r]))
+if len(exts) != 1: # if more than one extension provided
+    raise ValueError("All files specified with -r option must have the same extension!")
+
+# check target input files
+input_files_r = []
+if exts[0] == '.pdb': # if input files are pdbfiles
+    for file_r in args.input_files_r:
+        if os.path.exists(file_r):
+            input_files_r.append(os.path.abspath(file_r))
+        else:
+            raise ValueError("File %s not found!"%(file_r))
+
+    ntargets = len(input_files_r)
+    nid_digits = max(3, len(str(ntargets)))
+    targetids = []
+
+    for jdx, file_r in enumerate(input_files_r):
+        targetids.append('target'+(nid_digits-len(str(jdx+1)))*'0' + str(jdx+1))
+    is_csvfile_r = False
+elif exts[0] == '.csv': # if input files is the csvfile
+    if len(args.input_files_r) != 1:
+        raise ValueError("More than 1 csvfile specified with -r option.")
+
+    df_targets = pd.read_csv(args.input_files_r[0])
+    input_files_r = [os.path.abspath(ff) for ff in list(df_targets['pdbfile'])]
+    ntargets = len(input_files_r)
+    targetids = list(df_targets['targetID'])
+    is_csvfile_r = True
+else:
+    raise IOError("Extension of files used with -r option not recognized!")
+
+exts_l = list(set([os.path.splitext(ff)[1] for ff in args.input_files_l]))
+if len(exts_l) != 1: # if more than one extension provided
+    raise ValueError("All files specified with -l option must have the same extension!")
+
+# check ligand input files
+input_files_l = []
+if exts_l[0] == '.mol2': # if input files are .mol2
+    for file_l in args.input_files_l:
+        if os.path.exists(file_l):
+            input_files_l.append(os.path.abspath(file_l))
+        else:
+            raise ValueError("File %s not found!"%(file_l))
+
+    nligands = len(input_files_l)
+    nid_digits = max(3, len(str(nligands)))
+    ligandids = []
+
+    for jdx, file_r in enumerate(input_files_l): 
+        nligands_file_l = get_number_of_compounds(file_l)
+        if nligands_file_l == 1:
+            ligandids.append('lig'+(nid_digits-len(str(jdx+1)))*'0' + str(jdx+1))
+        else:
+            raise IOError("Every ligand file should contain at least 1 structure, or use the prepare_compounds routine!")
+    is_csvfile_l = False
+    use_isomer_folder = False
+
+elif exts_l[0] == '.csv': # if input files is a csvfile
+    if len(args.input_files_l) != 1:
+        raise ValueError("More than 1 csvfile specified with -l option.")
+
+    df_ligands = pd.read_csv(args.input_files_l[0])
+    input_files_l = [os.path.abspath(ff) for ff in list(df_ligands['mol2file'])]
+    nligands = len(input_files_l)
+    ligandids = list(df_ligands['ligID'])
+    isomers = list(df_ligands['isomer'])
+
+    is_csvfile_l = True
+    if all(x==1 for x in isomers):
+        use_isomer_folder = False
+    else:
+        use_isomer_folder = True
+else:
+    raise IOError("Extension of files used with -r option not recognized!")
+
+if not os.path.isfile(args.config_file):
+    raise ValueError("Config file %s not found!"%args.config_file)
+
+if build == 2: # check if only one program was used for docking
+    config = ConfigParser.SafeConfigParser()
+    config.read(args.config_file)
+    if config.has_option('DOCKING', 'program'):
+        instances = config.get('DOCKING', 'program').lower()
+        instances = map(str.strip, instances.split(','))
+        if len(instances) == 1:
+            instance = instances[0]
+        else:
+            sys.exit("More than one docking program cannot be used for docking!")
+
+exclude_line = ""
+if exclude:
+    exclude_line = "\n#SBATCH --exclude=%s"%(','.join(exclude))
+
+def update_config_file(new_config_file, config_file, label_r, csvfile):
+    """Update binding site parameters in config file"""
+
+    # create tmp config file name from original config file
+    tmp_config_file = list(os.path.splitext(new_config_file))
+    tmp_config_file.insert(1,'_tmp')
+    tmp_config_file = ''.join(tmp_config_file)
+
+    # remove section 'SITE' and option site in DOCKING section of config file if exists
+    with open(tmp_config_file, 'w') as tmpf:
+        with open(config_file, 'r') as newf:
+            isdock = False
+            sitesection = False
+            docksection = False
+            for line in newf:
+                # check if still in section SITE*
+                if line.startswith('[SITE'):
+                    sitesection = True
+                if sitesection and line.startswith('[') and not line.startswith('[SITE'): # new section has been reached
+                    sitesection = False
+                # check if still in section DOCKING
+                if line.startswith('[DOCKING]'):
+                    docksection = True
+                    isdock = True
+                if docksection and line.startswith('[') and not line.startswith('[DOCKING]'): # new section has been reached
+                    docksection = False
+                # check if option line in section DOCKING
+                if line.strip().startswith('site') and docksection:
+                    siteline = True
+                else:
+                    siteline = False
+                if not sitesection and not siteline:
+                    tmpf.write(line)
+    shutil.move(tmp_config_file, new_config_file)
+
+    df = pd.read_csv(csvfile)
+    rows = df[df['target'] == label_r]
+
+    nsites = len(rows)
+    if nsites == 1:
+         # add new sections 'SITE' and option site
+        with open(tmp_config_file, 'w') as tmpf:
+            with open(new_config_file, 'r') as newf:
+                for line in newf:
+                    tmpf.write(line)
+                for row in rows.iterrows():
+                    section = 'SITE'
+                    center_conf = row[1]['center']
+                    boxsize_conf = row[1]['size']
+
+                    newsite_section = """
+[%(section)s]
+center = %(center_conf)s
+boxsize = %(boxsize_conf)s"""% locals()
+                    tmpf.write(newsite_section+'\n')
+    elif nsites > 1:
+        # add new sections 'SITE' and option site
+        with open(tmp_config_file, 'w') as tmpf:
+            with open(new_config_file, 'r') as newf:
+                for line in newf:
+                    tmpf.write(line)
+                    if line.startswith('[DOCKING]'):
+                        tmpf.write('site = ' + ', '.join(['site%s'%int(row[1]['site']) for row in rows.iterrows()])+'\n')
+                for row in rows.iterrows():
+                    section = 'SITE' + str(int(row[1]['site']))
+                    center_conf = row[1]['center']
+                    boxsize_conf = row[1]['size']
+
+                    newsite_section = """
+[%(section)s]
+center = %(center_conf)s
+boxsize = %(boxsize_conf)s"""% locals()
+                    tmpf.write(newsite_section+'\n')
+    shutil.move(tmp_config_file, new_config_file)
+
+rundir = args.rundir
+
+# always overwrite by default
+shutil.rmtree(rundir, ignore_errors=True)
+os.mkdir(rundir)
+
+config_file_basename = os.path.basename(args.config_file)
+
+# copy config files
+configdir = 'config'
+shutil.rmtree(configdir, ignore_errors=True)
+os.mkdir(configdir)
+config_suff, config_ext = os.path.splitext(config_file_basename)
+
+config_files = []
+for idx, file_r in enumerate(input_files_r):
+    recid = targetids[idx]
+    new_config_file = configdir + '/' + config_suff + '_%s'%(idx+1) + config_ext
+    update_config_file(new_config_file, args.config_file, recid, args.sitecsv)
+    config_files.append(new_config_file)
+
+for jdx in range(nligands): #, file_l in enumerate(input_files_l):
+    ligid = ligandids[jdx]
+    for idx in range(ntargets): # file_r in enumerate(input_files_r):
+        recid = targetids[idx]
+        if use_isomer_folder:
+            workdir = rundir + '/' + ligid + '/' + recid + '/isomer' + str(isomers[jdx])
+        else:
+            workdir = rundir + '/' + ligid + '/' + recid
+
+        if not build or build in [0, 1]:
+            os.makedirs(workdir)
+
+        # create list of relative paths for targets and receptors
+        if jdx == 0 and idx == 0:
+            input_files_l_rel = []
+            for file_l in input_files_l:
+                input_files_l_rel.append(os.path.relpath(file_l, workdir))
+
+            input_files_r_rel = []
+            for file_r in input_files_r:
+                input_files_r_rel.append(os.path.relpath(file_r, workdir))
+
+            config_files_rel = []
+            for file_c in config_files:
+                config_files_rel.append(os.path.relpath(file_c, workdir))
+
+        if not build or build in [0, 1]:
+            script = shebang
+            if build == 0:
+                script += """\n#SBATCH --time=%(walltime)s
+#SBATCH --partition=%(partition)s
+#SBATCH --job-name='%(ligid)s'%(exclude_line)s
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --nodes=1"""%locals()
+            script += "\n\nrundbx -f %s -l %s -r %s"%(config_files_rel[idx], input_files_l_rel[jdx], input_files_r_rel[idx])
+
+            with open(workdir+"/run.sh", 'w') as slurmf:
+                slurmf.write(script)
+
+scriptdir = 'to_submit'
+shutil.rmtree(scriptdir, ignore_errors=True)
+
+#for dir in vs/lig*/tar*/isomer*/; do cd $dir; sbatch run.sh; cd ../../../..; done
+if build in [1, 2]:
+    # create jobs to be submitted
+    single_job_time_sec = slurm_to_seconds(time)
+    walltime_sec = slurm_to_seconds(walltime)
+    
+    time_all_targets = single_job_time_sec*ntargets
+    os.mkdir(scriptdir)
+
+    if time_all_targets <= walltime_sec:
+        nligands_per_job = int(walltime_sec/time_all_targets)
+        nscripts = nligands/nligands_per_job
+
+        for idx in range(nscripts+1):
+            if idx < nscripts:
+                idx_first = idx*nligands_per_job
+                idx_last = (idx+1)*nligands_per_job-1
+            elif idx == nscripts:
+                nligands_last_job = nligands - nscripts*nligands_per_job
+                if nligands_last_job != 0:
+                    idx_first = nscripts*nligands_per_job
+                    idx_last = nscripts*nligands_per_job + nligands_last_job - 1
+                else:
+                    break
+            index = idx + 1
+            script = """%(shebang)s
+#SBATCH --time=%(walltime)s
+#SBATCH --partition=%(partition)s
+#SBATCH --job-name="vs%(index)s"%(exclude_line)s
+#SBATCH --output=/dev/null
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+"""%locals()
+            if build == 1:
+                workdirs = []
+                for jdx in range(idx_first, idx_last+1):
+                    dir = args.rundir + '/' + ligandids[jdx] + '/target*'
+                    if use_isomer_folder:
+                        dir += '/isomer' + str(isomers[jdx])
+                    workdirs.append(dir)
+
+                workdirs_str = ' '.join(workdirs)
+                script += """\ndirs=`echo %(workdirs_str)s`
+curdir=`pwd`
+for dir in $dirs; do
+  cd $dir
+  bash run.sh
+  cd $curdir
+done\n"""%locals()
+            elif build == 2:
+                ligandids_str = " ".join(["'%s'"%id for id in ligandids[idx_first:idx_last+1]])
+                targetids_str = " ".join(["'%s'"%id for id in sorted(list(set(targetids)))])
+                isomerids_str = ' '.join(["'%s'"%isomers[jdx] for jdx in range(idx_first,idx_last+1)])
+                if use_isomer_folder:
+                    create_isomerdir_line = '\nworkdir=$workdir/isomer${isomerids[$id_l]}\nmkdir $workdir'
+                else:
+                    create_isomerdir_line = ''
+                files_l_str = " ".join(["'%s'"%ff for ff in input_files_l_rel[idx_first:idx_last+1]])
+                files_r_str = " ".join(["'%s'"%ff for ff in input_files_r_rel])
+                files_c_str = " ".join(["'%s'"%ff for ff in config_files_rel])
+                script += """\nset -e
+curdir=`pwd`
+
+# get ids
+declare -a ligids=(%(ligandids_str)s)
+declare -a targetids=(%(targetids_str)s)
+declare -a isomerids=(%(isomerids_str)s)
+
+# get relative files locations
+declare -a files_l=(%(files_l_str)s)
+declare -a files_r=(%(files_r_str)s)
+declare -a files_c=(%(files_c_str)s)
+
+nfiles_l=`echo ${#files_l[@]}`
+nfiles_r=`echo ${#files_r[@]}`
+
+joinedids=$(echo ${targetids[@]} | sed "s/ /,/g")
+echo ligID,isomer,${joinedids[@]} > vs/%(instance)s_%(index)s.csv
+
+for id_l in `seq 0 $((nfiles_l-1))`; do
+  dir_l=vs/${ligids[$id_l]}
+  mkdir $dir_l
+  line=${ligids[$id_l]},${isomerids[$id_l]}
+  for id_r in `seq 0 $((nfiles_r-1))`; do
+    dir_r=${targetids[$id_r]}
+    workdir=$dir_l/$dir_r
+    # make directories
+    mkdir $workdir%(create_isomerdir_line)s
+    cd $workdir
+    # run dockbox command
+    rundbx -f ${files_c[$id_r]} -l ${files_l[$id_l]} -r ${files_r[$id_r]} &> /dev/null
+    # collect results
+    score=
+    if [ -f %(instance)s/score.out ]; then
+        score=`head -n 1 %(instance)s/score.out`
+    fi
+    line=$line,$score
+    cd $curdir
+  done
+  echo $line >> vs/%(instance)s_%(index)s.csv
+  # extract results
+  rm -rf $dir_l
+done\n"""%locals()
+
+            with open(scriptdir+'/run_vs_%i.slurm'%(idx+1), 'w') as ff:
+                ff.write(script)
