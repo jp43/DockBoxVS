@@ -9,6 +9,11 @@ import subprocess
 import ConfigParser
 import pandas as pd
 
+from mdkit.amber.ambertools import load_PROTON_INFO
+from mdkit.amber.ambertools import load_atomic_ions
+
+equivalent_residues = {'CYM': 'CYS', 'LYN': 'LYS'}
+
 known_formats = ['.pdb']
 parser = argparse.ArgumentParser(description="Prepare target files for Virtual Screening (2nd stage)")
 
@@ -59,6 +64,35 @@ def prepare_structure_with_prepwizard(file_r, flags):
     subprocess.check_output('./' + script_name + " &> recprep.log", shell=True, executable='/bin/bash')
     return os.path.abspath(new_file_r)
 
+def check_and_update_pdbfile(fileout, filein):
+
+    proton_info = load_PROTON_INFO()
+    ions_info = load_atomic_ions()
+
+    content = ''
+    # check if the .pdb file is valid
+    with open(filein, 'r') as pdbf:
+        is_end_line = False
+        for line in pdbf:
+            if line.startswith(('ATOM', 'HETATM')):
+                resname = line[17:20].strip()
+                if resname in ions_info:
+                    pass
+                elif resname not in proton_info or line.startswith('HETATM'):
+                    if resname in equivalent_residues:
+                        line = line.replace(resname, equivalent_residues[resname])
+                    else:
+                        sys.exit('Unrecognized residue %s found in %s! The .pdb file should \
+only contains one protein structure with standard residues (with possibly ions)!'%(resname, filein))
+                if is_end_line:
+                    sys.exit("More than one structure detected in .pdb file! Check your file again!")
+            elif line.startswith('END'):
+                is_end_line = True
+            content += line
+
+    with open(fileout, 'w') as pdbf:
+        pdbf.write(content)
+
 curdir = os.getcwd()
 
 input_files_r = []
@@ -89,11 +123,14 @@ for idx, file_r in enumerate(input_files_r):
     os.chdir(dir_r)
 
     if args.prepwizard:
-        pdbfile = prepare_structure_with_prepwizard(file_r, args.prepwizard_flags)
+        pdbfile_prep = prepare_structure_with_prepwizard(file_r, args.prepwizard_flags)
+        pdbfile = os.path.basename(pdbfile_prep)
+        check_and_update_pdbfile(pdbfile, pdbfile_prep)
     else:
         pdbfile = os.path.basename(file_r)
-        shutil.copyfile(file_r, pdbfile)
-        pdbfile = os.path.abspath(pdbfile)
+        check_and_update_pdbfile(pdbfile, file_r)
+
+    pdbfile = os.path.abspath(pdbfile)
     os.chdir(curdir)
 
     info['targetID'].append(targetid)
