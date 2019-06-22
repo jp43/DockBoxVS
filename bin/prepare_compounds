@@ -61,7 +61,7 @@ def generate_multiple_files_with_babel(file_l, args):
     output_file = basename + '_' + extout
 
     # generate multiple files using babel
-    subprocess.check_output('babel %s %s %s %s -m %s 2>/dev/null'%(input_format_flag, file_l, output_format_flag, output_file, other_flags), shell=True)
+    subprocess.check_output('babel %s %s %s %s -m %s'%(input_format_flag, file_l, output_format_flag, output_file, other_flags), shell=True)
 
     output_files = []
     for idx in range(len(glob(basename+'_*'+extout))):

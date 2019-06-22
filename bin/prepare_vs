@@ -9,6 +9,25 @@ from glob import glob
 
 import pandas as pd
 
+known_schedulers = {'sge': 'Sun Grid Engine', 'slurm': 'Slurm Workload Manager'}
+exes = {'sge': 'qsub', 'slurm': 'sbatch'}
+
+# default and mandatory options for schedulers
+default_options = {'sge': {'S': '/bin/bash',
+'o': 'sge-$JOB_ID.out',
+'e': 'sge-$JOB_ID.err',
+'N': 'vs',
+'cwd': '',
+'V': ''},
+'slurm': {'job-name': 'vs',
+'ntasks': '1',
+'cpus-per-task': '1',
+'nodes': '1'}}
+
+mandatory_options = {'sge': ['q'],
+'slurm': [('p', 'partition'), ('t', 'time')]}
+
+#TODO: add the possibilty to prepare scripts for torque and ll
 parser = argparse.ArgumentParser(description="Build directories and config files for Virtual Screening (4th stage)")
 
 parser.add_argument('-l',
@@ -34,12 +53,19 @@ parser.add_argument('-f',
     default='config.ini',
     help='config file: .ini')
 
-parser.add_argument('-build',
-    dest='build',
+parser.add_argument('-level',
+    dest='level',
     type=int,
     metavar='INT',
     default=None,
-    help='Build scripts to be submitted to SLURM scheduler. 0: docking, 1: docking with large number of compounds, 2: VS with small number of compounds, 2: VS with large number of compounds')
+    help='Level of Virtual Screening considered. From 0 (docking with a few compounds) to 3 (VS with a large number of compounds)')
+
+parser.add_argument('--nligands-per-job',
+    dest='nligands_per_job',
+    type=int,
+    metavar='INT',
+    default=None,
+    help='Number of ligands to be run for every submitted job (used for VS levels 2 or 3))')
 
 parser.add_argument('-s',
     dest='sitecsv',
@@ -55,35 +81,15 @@ parser.add_argument('-w',
     metavar='DIRECTORY NAME',
     help='name of directory created for virtual screening')
 
-others = parser.add_argument_group('arguments to build scripts (to be used with -build option)')
+group = parser.add_mutually_exclusive_group(required=False)
 
-others.add_argument('-exclude',
-    dest='exclude',
-    default=None,
-    nargs='+',
-    metavar='NODE',
-    help='Nodes to be excluded. Default: none')
-
-others.add_argument('-p',
-    dest='partition',
-    type=str,
-    default='serial',
-    metavar='NAME',
-    help='SLURM Partition name. Default: serial')
-
-others.add_argument('-t',
-    dest='time',
-    type=str,
-    default='00:05:00',
-    metavar='TIME',
-    help='Approx. time needed for a single job in hh:mm:ss or dd-hh:mm format! Default: 00:05:00')
-
-others.add_argument('-wt',
-    dest='walltime',
-    type=str,
-    default='24:00:00',
-    metavar='WALLTIME',
-    help='Max. walltime in hh:mm:ss or dd-hh:mm format used for slurm scripts (default: 24:00:00)')
+for sch in known_schedulers:
+    group.add_argument('-%s'%sch,
+        dest='%s_options'%sch,
+        type=str,
+        metavar='OPTIONS',
+        default=None,
+        help='Options for %s'%known_schedulers[sch])
 
 def get_number_of_compounds(file_l):
     suffix, ext = os.path.splitext(file_l)
@@ -155,10 +161,78 @@ def seconds_to_slurm(time):
        slurm_time = '%s:%s:00'%(hours_str, minutes_str)
     return slurm_time
 
-args = parser.parse_args()
-locals().update(args.__dict__)
+def check_scheduler_options(string, scheduler):
 
-shebang = '#!/bin/bash'
+    options = string.split(',')
+    noptions = len(options)/2
+    if len(options) != 2*noptions:
+        raise IOError('Number of options provided for th scheduler should be even!')
+
+    options_names = options[::2]
+    # check if mandatory options have been set
+    for mo in mandatory_options[scheduler]:
+        if isinstance(mo, tuple):
+            is_option = False
+            for item in mo:
+                if item in options_names and not is_option:
+                    is_option = True
+                elif item in options_names and is_option:
+                    raise ValueError('Two times the same option was given for %s scheduler!'%scheduler)
+            if not is_option:
+                raise ValueError('Option %s mandatory for %s scheduler is not provided'%(mo[0],scheduler))
+        elif mo not in options_names:
+            raise ValueError('Option %s mandatory for %s scheduler is not provided'%(mo,scheduler))
+
+    options_dict = {}
+    for key, value in default_options[scheduler].iteritems():
+        options_dict[key] = value
+
+    for idx in range(noptions):
+        key = str(options[2*idx])
+        value = str(options[2*idx+1])
+        options_dict[key] = value
+
+    return options_dict
+
+def make_header(options, scheduler, jobname=None):
+
+    header = "#!/bin/bash\n"
+    for key, value in options.iteritems():
+        if scheduler.lower() == 'sge':
+            if jobname is not None and key == 'N':
+                value = jobname
+            header += '#$ -%s %s\n'%(key, value)
+        elif scheduler.lower() == 'slurm':
+            if len(key) == 1:
+                if jobname is not None and key == 'j':
+                    value = jobname
+                header += '#SBATCH -%s=%s\n'%(key, value)
+            else:
+                if jobname is not None and key == 'job-name':
+                    value = jobname
+                header += '#SBATCH --%s=%s\n'%(key, value)
+    return header
+
+args = parser.parse_args()
+
+if args.level in [2, 3]:
+    if args.nligands_per_job is None:
+        raise ValueError('nligands_per_job option should be specified with VS lvl 2 or 3!')
+    else:
+        nligands_per_job = args.nligands_per_job
+
+scheduler = None
+exe = None
+for sch in known_schedulers:
+    args_dict = vars(args)
+    if args_dict[sch+'_options'] is not None:
+        scheduler = sch
+        exe = exes[sch]
+        scheduler_options_args = args_dict[sch+'_options']
+
+scheduler_options = check_scheduler_options(scheduler_options_args, scheduler)
+
+locals().update(args.__dict__)
 
 exts = list(set([os.path.splitext(ff)[1] for ff in args.input_files_r]))
 if len(exts) != 1: # if more than one extension provided
@@ -239,7 +313,7 @@ else:
 if not os.path.isfile(args.config_file):
     raise ValueError("Config file %s not found!"%args.config_file)
 
-if build == 2: # check if only one program was used for docking
+if level == 3: # check if only one program was used for docking
     config = ConfigParser.SafeConfigParser()
     config.read(args.config_file)
     if config.has_option('DOCKING', 'program'):
@@ -248,11 +322,7 @@ if build == 2: # check if only one program was used for docking
         if len(instances) == 1:
             instance = instances[0]
         else:
-            sys.exit("More than one docking program cannot be used for docking!")
-
-exclude_line = ""
-if exclude:
-    exclude_line = "\n#SBATCH --exclude=%s"%(','.join(exclude))
+            sys.exit("More than one docking program cannot be used with VS level 3!")
 
 def update_config_file(new_config_file, config_file, label_r, csvfile):
     """Update binding site parameters in config file"""
@@ -287,6 +357,9 @@ def update_config_file(new_config_file, config_file, label_r, csvfile):
                     siteline = False
                 if not sitesection and not siteline:
                     newline = line.replace("$targetid", label_r)
+                    newline = newline.replace("${targetid}", label_r)
+                    newline = newline.replace("${target_id}", label_r)
+                    newline = newline.replace("$target_id", label_r)
                     tmpf.write(newline)
     shutil.move(tmp_config_file, new_config_file)
 
@@ -333,7 +406,6 @@ boxsize = %(boxsize_conf)s"""% locals()
     shutil.move(tmp_config_file, new_config_file)
 
 rundir = args.rundir
-
 # always overwrite by default
 shutil.rmtree(rundir, ignore_errors=True)
 os.mkdir(rundir)
@@ -354,16 +426,16 @@ for idx, file_r in enumerate(input_files_r):
     update_config_file(new_config_file, args.config_file, recid, args.sitecsv)
     config_files.append(new_config_file)
 
-for jdx in range(nligands): #, file_l in enumerate(input_files_l):
+for jdx in range(nligands):
     ligid = ligandids[jdx]
-    for idx in range(ntargets): # file_r in enumerate(input_files_r):
+    for idx in range(ntargets):
         recid = targetids[idx]
         if use_isomer_folder:
             workdir = rundir + '/' + ligid + '/' + recid + '/isomer' + str(isomers[jdx])
         else:
             workdir = rundir + '/' + ligid + '/' + recid
 
-        if not build or build in [0, 1, 2]:
+        if args.level is None or args.level in [0, 1, 2]:
             os.makedirs(workdir)
 
         # create list of relative paths for targets and receptors
@@ -380,132 +452,109 @@ for jdx in range(nligands): #, file_l in enumerate(input_files_l):
             for file_c in config_files:
                 config_files_rel.append(os.path.relpath(file_c, workdir))
 
-        if not build or build in [0, 1, 2]:
-            script = shebang
-            if build == 0:
-                script += """\n#SBATCH --time=%(walltime)s
-#SBATCH --partition=%(partition)s
-#SBATCH --job-name='%(ligid)s'%(exclude_line)s
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=1
-#SBATCH --nodes=1"""%locals()
+        if args.level is None or args.level in [0, 1, 2]:
+            script = ""
+            if args.level == 0:
+                filename = workdir+"/run."+scheduler
+                script += make_header(scheduler_options, scheduler)
+            else:
+                filename = workdir+"/run.sh"
+                script += '#!/bin/bash'
             script += "\n\nrundbx -f %s -l %s -r %s\n"%(config_files_rel[idx], input_files_l_rel[jdx], input_files_r_rel[idx])
 
-            with open(workdir+"/run.sh", 'w') as slurmf:
-                slurmf.write(script)
+            with open(filename, 'w') as ff:
+                ff.write(script)
 
-if build is not None:
+if args.level is not None:
     scriptdir = 'to_submit_' + rundir
     shutil.rmtree(scriptdir, ignore_errors=True)
     os.mkdir(scriptdir)
-    submit_all_script = scriptdir + '/submit_all.sh'
+    submit_all_filename = scriptdir + '/submit_all.sh'
 
-if build == 0:
+if args.level == 0:
     dirs = rundir + '/lig*/target*'
     if use_isomer_folder:
         dirs += '/isomer*'
     # write script to submit all jobs
-    script_all = """%(shebang)s
+    script_all = """#!/bin/bash
 curdir=`pwd`
 for dir in %(dirs)s; do
   cd $dir
-  sbatch run.sh
+  %(exe)s run.%(scheduler)s
   cd $curdir
 done\n"""%locals()
-    with open(submit_all_script, 'w') as ff:
+    with open(submit_all_filename, 'w') as ff:
         ff.write(script_all)
 
-elif build == 1:
-    for jdx in range(nligands): #, file_l in enumerate(input_files_l):
+elif args.level == 1:
+    for jdx in range(nligands):
         ligid = str(ligandids[jdx])
         dirs = rundir + '/' + ligid+ '/target*'
         if use_isomer_folder:
             dirs += '/isomer' + str(isomers[jdx])
-
-        script = """%(shebang)s
-#SBATCH --time=%(walltime)s
-#SBATCH --partition=%(partition)s
-#SBATCH --job-name="%(ligid)s"
-#SBATCH --output=/dev/null
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=1
-
-curdir=`pwd`
+        script = make_header(scheduler_options, scheduler, jobname=ligid)
+        script += """\ncurdir=`pwd`
 for dir in %(dirs)s; do
   cd $dir
   bash run.sh
   cd $curdir
 done\n"""%locals()
-
-        with open(scriptdir+'/run_vs_%i.slurm'%(jdx+1), 'w') as ff:
+        with open(scriptdir+'/run_vs_%i.'%(jdx+1)+scheduler, 'w') as ff:
             ff.write(script)
 
-    with open(submit_all_script, 'w') as ff:
-        ff.write("""%(shebang)s
+    with open(submit_all_filename, 'w') as ff:
+        ff.write("""#!/bin/bash
 curdir=`pwd`
-for slurmfile in %(scriptdir)s/run_vs_*.slurm; do
-  sbatch $slurmfile
+for file in %(scriptdir)s/run_vs_*.%(scheduler)s; do
+  %(exe)s $file
 done\n"""%locals())
 
-elif build in [2, 3]:
+elif args.level in [2, 3]:
     # create jobs to be submitted
-    single_job_time_sec = slurm_to_seconds(time)
-    walltime_sec = slurm_to_seconds(walltime)
-    
-    time_all_targets = single_job_time_sec*ntargets
+    nscripts = nligands/nligands_per_job
 
-    if time_all_targets <= walltime_sec:
-        nligands_per_job = int(walltime_sec/time_all_targets)
-        nscripts = nligands/nligands_per_job
+    for idx in range(nscripts+1):
+        if idx < nscripts:
+            idx_first = idx*nligands_per_job
+            idx_last = (idx+1)*nligands_per_job-1
+        elif idx == nscripts:
+            nligands_last_job = nligands - nscripts*nligands_per_job
+            if nligands_last_job != 0:
+                idx_first = nscripts*nligands_per_job
+                idx_last = nscripts*nligands_per_job + nligands_last_job - 1
+            else:
+                break
+        index = idx + 1
+        script = make_header(scheduler_options, scheduler, jobname="vs%s"%index)
 
-        for idx in range(nscripts+1):
-            if idx < nscripts:
-                idx_first = idx*nligands_per_job
-                idx_last = (idx+1)*nligands_per_job-1
-            elif idx == nscripts:
-                nligands_last_job = nligands - nscripts*nligands_per_job
-                if nligands_last_job != 0:
-                    idx_first = nscripts*nligands_per_job
-                    idx_last = nscripts*nligands_per_job + nligands_last_job - 1
-                else:
-                    break
-            index = idx + 1
-            script = """%(shebang)s
-#SBATCH --time=%(walltime)s
-#SBATCH --partition=%(partition)s
-#SBATCH --job-name="vs%(index)s"%(exclude_line)s
-#SBATCH --output=/dev/null
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=1
-"""%locals()
-            if build == 2:
-                workdirs = []
-                for jdx in range(idx_first, idx_last+1):
-                    dir = args.rundir + '/' + ligandids[jdx] + '/target*'
-                    if use_isomer_folder:
-                        dir += '/isomer' + str(isomers[jdx])
-                    workdirs.append(dir)
+        if args.level == 2:
+            workdirs = []
+            for jdx in range(idx_first, idx_last+1):
+                dir = args.rundir + '/' + ligandids[jdx] + '/target*'
+                if use_isomer_folder:
+                    dir += '/isomer' + str(isomers[jdx])
+                workdirs.append(dir)
 
-                workdirs_str = ' '.join(workdirs)
-                script += """\ndirs=`echo %(workdirs_str)s`
+            workdirs_str = ' '.join(workdirs)
+            script += """\ndirs=`echo %(workdirs_str)s`
 curdir=`pwd`
 for dir in $dirs; do
   cd $dir
   bash run.sh
   cd $curdir
 done\n"""%locals()
-            elif build == 3:
-                ligandids_str = " ".join(["'%s'"%id for id in ligandids[idx_first:idx_last+1]])
-                targetids_str = " ".join(["'%s'"%id for id in sorted(list(set(targetids)))])
-                isomerids_str = ' '.join(["'%s'"%isomers[jdx] for jdx in range(idx_first,idx_last+1)])
-                if use_isomer_folder:
-                    create_isomerdir_line = '\nworkdir=$workdir/isomer${isomerids[$id_l]}\nmkdir $workdir'
-                else:
-                    create_isomerdir_line = ''
-                files_l_str = " ".join(["'%s'"%ff for ff in input_files_l_rel[idx_first:idx_last+1]])
-                files_r_str = " ".join(["'%s'"%ff for ff in input_files_r_rel])
-                files_c_str = " ".join(["'%s'"%ff for ff in config_files_rel])
-                script += """\nset -e
+        elif args.level == 3:
+            ligandids_str = " ".join(["'%s'"%id for id in ligandids[idx_first:idx_last+1]])
+            targetids_str = " ".join(["'%s'"%id for id in sorted(list(set(targetids)))])
+            isomerids_str = ' '.join(["'%s'"%isomers[jdx] for jdx in range(idx_first,idx_last+1)])
+            if use_isomer_folder:
+                create_isomerdir_line = '\nworkdir=$workdir/isomer${isomerids[$id_l]}\nmkdir $workdir'
+            else:
+                create_isomerdir_line = ''
+            files_l_str = " ".join(["'%s'"%ff for ff in input_files_l_rel[idx_first:idx_last+1]])
+            files_r_str = " ".join(["'%s'"%ff for ff in input_files_r_rel])
+            files_c_str = " ".join(["'%s'"%ff for ff in config_files_rel])
+            script += """\nset -e
 curdir=`pwd`
 
 # get ids
@@ -549,5 +598,11 @@ for id_l in `seq 0 $((nfiles_l-1))`; do
   rm -rf $dir_l
 done\n"""%locals()
 
-            with open(scriptdir+'/run_vs_%i.slurm'%(idx+1), 'w') as ff:
-                ff.write(script)
+    with open(scriptdir+'/run_vs_%i.'%index+scheduler, 'w') as ff:
+        ff.write(script)
+
+    with open(submit_all_filename, 'w') as ff:
+        ff.write("""#!/bin/bash
+for file in %(scriptdir)s/run_vs_*.%(scheduler)s; do
+  %(exe)s $file
+done"""%locals())
