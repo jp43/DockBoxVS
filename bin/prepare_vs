@@ -24,8 +24,8 @@ default_options = {'sge': {'S': '/bin/bash',
 'cpus-per-task': '1',
 'nodes': '1'}}
 
-mandatory_options = {'sge': ['q'],
-'slurm': [('p', 'partition'), ('t', 'time')]}
+mandatory_options = {'sge': ['q'], 'slurm': ['partition', 'time']}
+equivalent_options = {'slurm': {'p': 'partition', 't': 'time', 'j': 'jobname', 'x': 'exclude'}}
 
 #TODO: add the possibilty to prepare scripts for torque and ll
 parser = argparse.ArgumentParser(description="Build directories and config files for Virtual Screening (4th stage)")
@@ -168,21 +168,6 @@ def check_scheduler_options(string, scheduler):
     if len(options) != 2*noptions:
         raise IOError('Number of options provided for th scheduler should be even!')
 
-    options_names = options[::2]
-    # check if mandatory options have been set
-    for mo in mandatory_options[scheduler]:
-        if isinstance(mo, tuple):
-            is_option = False
-            for item in mo:
-                if item in options_names and not is_option:
-                    is_option = True
-                elif item in options_names and is_option:
-                    raise ValueError('Two times the same option was given for %s scheduler!'%scheduler)
-            if not is_option:
-                raise ValueError('Option %s mandatory for %s scheduler is not provided'%(mo[0],scheduler))
-        elif mo not in options_names:
-            raise ValueError('Option %s mandatory for %s scheduler is not provided'%(mo,scheduler))
-
     options_dict = {}
     for key, value in default_options[scheduler].iteritems():
         options_dict[key] = value
@@ -190,7 +175,14 @@ def check_scheduler_options(string, scheduler):
     for idx in range(noptions):
         key = str(options[2*idx])
         value = str(options[2*idx+1])
+        if scheduler in equivalent_options and key in equivalent_options[scheduler]:
+            key = equivalent_options[scheduler][key]
         options_dict[key] = value
+
+    # check if mandatory options have been set
+    for mo in mandatory_options[scheduler]:
+        if mo not in options_dict.keys():
+            raise ValueError('Option %s mandatory for %s scheduler is not provided'%(mo,scheduler))
 
     return options_dict
 
@@ -228,15 +220,24 @@ for sch in known_schedulers:
     if args_dict[sch+'_options'] is not None:
         scheduler = sch
         exe = exes[sch]
-        scheduler_options_args = args_dict[sch+'_options']
+        scheduler_options = check_scheduler_options(args_dict[sch+'_options'], scheduler)
+if scheduler is None:
+    scheduler_options = None
 
-scheduler_options = check_scheduler_options(scheduler_options_args, scheduler)
+if scheduler is None and args.level in [1, 2, 3]:
+    sys.exit('Info about the scheduler should be provided when VS level is 1 or more!')
+
+if args.level in [2, 3]:
+    if args.nligands_per_job is None:
+        sys.exit('nligands_per_job option should be specified when VS level is 2 or 3!')
+    else:
+        nligands_per_job = args.nligands_per_job
 
 locals().update(args.__dict__)
 
 exts = list(set([os.path.splitext(ff)[1] for ff in args.input_files_r]))
 if len(exts) != 1: # if more than one extension provided
-    raise ValueError("All files specified with -r option must have the same extension!")
+    sys.exit("All files specified with -r option must have the same extension!")
 
 # check target input files
 input_files_r = []
@@ -322,7 +323,7 @@ if level == 3: # check if only one program was used for docking
         if len(instances) == 1:
             instance = instances[0]
         else:
-            sys.exit("More than one docking program cannot be used with VS level 3!")
+            sys.exit("More than one docking program cannot be used with level-3 VS!")
 
 def update_config_file(new_config_file, config_file, label_r, csvfile):
     """Update binding site parameters in config file"""
@@ -435,7 +436,7 @@ for jdx in range(nligands):
         else:
             workdir = rundir + '/' + ligid + '/' + recid
 
-        if args.level is None or args.level in [0, 1, 2]:
+        if level is None or level in [0, 1, 2]:
             os.makedirs(workdir)
 
         # create list of relative paths for targets and receptors
@@ -452,9 +453,9 @@ for jdx in range(nligands):
             for file_c in config_files:
                 config_files_rel.append(os.path.relpath(file_c, workdir))
 
-        if args.level is None or args.level in [0, 1, 2]:
+        if level is None or level in [0, 1, 2]:
             script = ""
-            if args.level == 0:
+            if level == 0:
                 filename = workdir+"/run."+scheduler
                 script += make_header(scheduler_options, scheduler)
             else:
@@ -465,18 +466,19 @@ for jdx in range(nligands):
             with open(filename, 'w') as ff:
                 ff.write(script)
 
-if args.level is not None:
+if level is not None:
     scriptdir = 'to_submit_' + rundir
     shutil.rmtree(scriptdir, ignore_errors=True)
     os.mkdir(scriptdir)
     submit_all_filename = scriptdir + '/submit_all.sh'
 
-if args.level == 0:
+if level == 0:
     dirs = rundir + '/lig*/target*'
     if use_isomer_folder:
         dirs += '/isomer*'
     # write script to submit all jobs
     script_all = """#!/bin/bash
+set -e
 curdir=`pwd`
 for dir in %(dirs)s; do
   cd $dir
@@ -486,14 +488,15 @@ done\n"""%locals()
     with open(submit_all_filename, 'w') as ff:
         ff.write(script_all)
 
-elif args.level == 1:
+elif level == 1:
     for jdx in range(nligands):
         ligid = str(ligandids[jdx])
         dirs = rundir + '/' + ligid+ '/target*'
         if use_isomer_folder:
             dirs += '/isomer' + str(isomers[jdx])
         script = make_header(scheduler_options, scheduler, jobname=ligid)
-        script += """\ncurdir=`pwd`
+        script += """\nset -e
+curdir=`pwd`
 for dir in %(dirs)s; do
   cd $dir
   bash run.sh
@@ -504,12 +507,13 @@ done\n"""%locals()
 
     with open(submit_all_filename, 'w') as ff:
         ff.write("""#!/bin/bash
+set -e
 curdir=`pwd`
 for file in %(scriptdir)s/run_vs_*.%(scheduler)s; do
   %(exe)s $file
 done\n"""%locals())
 
-elif args.level in [2, 3]:
+elif level in [2, 3]:
     # create jobs to be submitted
     nscripts = nligands/nligands_per_job
 
@@ -527,7 +531,7 @@ elif args.level in [2, 3]:
         index = idx + 1
         script = make_header(scheduler_options, scheduler, jobname="vs%s"%index)
 
-        if args.level == 2:
+        if level == 2:
             workdirs = []
             for jdx in range(idx_first, idx_last+1):
                 dir = args.rundir + '/' + ligandids[jdx] + '/target*'
@@ -536,14 +540,15 @@ elif args.level in [2, 3]:
                 workdirs.append(dir)
 
             workdirs_str = ' '.join(workdirs)
-            script += """\ndirs=`echo %(workdirs_str)s`
+            script += """\nset -e
+dirs=`echo %(workdirs_str)s`
 curdir=`pwd`
 for dir in $dirs; do
   cd $dir
   bash run.sh
   cd $curdir
 done\n"""%locals()
-        elif args.level == 3:
+        elif level == 3:
             ligandids_str = " ".join(["'%s'"%id for id in ligandids[idx_first:idx_last+1]])
             targetids_str = " ".join(["'%s'"%id for id in sorted(list(set(targetids)))])
             isomerids_str = ' '.join(["'%s'"%isomers[jdx] for jdx in range(idx_first,idx_last+1)])
@@ -575,6 +580,7 @@ echo ligID,isomer,${joinedids[@]} > vs/%(instance)s_%(index)s.csv
 
 for id_l in `seq 0 $((nfiles_l-1))`; do
   dir_l=vs/${ligids[$id_l]}
+  rm -rf $dir_l
   mkdir $dir_l
   line=${ligids[$id_l]},${isomerids[$id_l]}
   for id_r in `seq 0 $((nfiles_r-1))`; do
@@ -598,11 +604,12 @@ for id_l in `seq 0 $((nfiles_l-1))`; do
   rm -rf $dir_l
 done\n"""%locals()
 
-    with open(scriptdir+'/run_vs_%i.'%index+scheduler, 'w') as ff:
-        ff.write(script)
+        with open(scriptdir+'/run_vs_%i.'%index+scheduler, 'w') as ff:
+            ff.write(script)
 
     with open(submit_all_filename, 'w') as ff:
         ff.write("""#!/bin/bash
+set -e
 for file in %(scriptdir)s/run_vs_*.%(scheduler)s; do
   %(exe)s $file
 done"""%locals())
