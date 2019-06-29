@@ -1,0 +1,68 @@
+#!/usr/bin/env python
+import os
+import sys
+import argparse
+
+from glob import glob
+import pandas as pd
+
+parser = argparse.ArgumentParser(description="Extract from first round of VS!")
+
+parser.add_argument('-l',
+    dest='csvfile_l',
+    type=str,
+    required=True,
+    metavar='CSVFILE',
+    help='Name of csvfile used for the compounds')
+
+parser.add_argument('-n',
+    dest='nligs',
+    type=int,
+    metavar='INT',
+    default=5000,
+    help='Number of ligands to be extracted')
+
+parser.add_argument('-w',
+    dest='vsdir',
+    type=str,
+    required=True,
+    metavar='DIRECTORY NAME',
+    help='name of directory created for virtual screening')
+
+args = parser.parse_args()
+vsdir = args.vsdir
+
+if not os.path.isdir(vsdir):
+    sys.exit('Working directory %s does not exist'%vsdir)
+
+df_compounds = pd.read_csv(args.csvfile_l)
+csvfiles = glob(vsdir+'/*.csv')
+ncsvfiles = len(csvfiles)
+
+programs = list(set([os.path.basename(ff).split('_')[0] for ff in csvfiles]))
+nprograms = len(programs)
+
+if nprograms > 1:
+    sys.exit('VS with more than one program not implemented!')
+
+columns_to_keep = list(df_compounds.columns.values)
+columns_to_keep.append('target_best')
+
+for prgm in programs:
+    csvfiles = glob(vsdir + '/' + prgm + '_*.csv')
+    df = []
+    for idx in range(ncsvfiles):
+        csvfile = vsdir + '/' + prgm + '_%i.csv'%(idx+1)
+        df.append(pd.read_csv(csvfile))
+    df = pd.concat(df).reset_index()
+
+    target_columns = [col for col in df.columns.values if col.startswith('target')]
+    df['target_best'] = df[target_columns].min(axis=1)
+
+    if 'isomer' in columns_to_keep:
+        df = df.merge(df_compounds, on=['ligID', 'isomer'])
+    else:
+        df = df.merge(df_compounds, on=['ligID'])
+
+    df_best = df.nsmallest(args.nligs,'target_best').sort_values(by='ligID')
+    df_best[columns_to_keep].to_csv('compounds.csv', index=False)
