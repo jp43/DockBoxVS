@@ -6,36 +6,64 @@ import argparse
 from glob import glob
 import pandas as pd
 
-parser = argparse.ArgumentParser(description="Extract from first round of VS!")
+# default directories considered
+default_first_round_dir = '../round1'
+default_compound_dir = 'compounds'
+default_csvfile_l = 'compounds.csv'
+default_vsdir = 'vs'
 
-parser.add_argument('-l',
-    dest='csvfile_l',
-    type=str,
-    required=True,
-    metavar='CSVFILE',
-    help='Name of csvfile used for the compounds')
+parser = argparse.ArgumentParser(description="Extract from first round of VS!")
 
 parser.add_argument('-n',
     dest='nligs',
     type=int,
     metavar='INT',
-    default=5000,
+    required=True,
     help='Number of ligands to be extracted')
 
-parser.add_argument('-w',
-    dest='vsdir',
-    type=str,
-    required=True,
+parser.add_argument('-c',
+    dest='compound_dir',
+    default=default_compound_dir,
+    metavar='FOLDER NAME',
+    help='Name of folder containing the compounds. Default: %s'%default_compound_dir)
+
+parser.add_argument('-d',
+    dest='first_round_dir',
+    default=default_first_round_dir,
     metavar='DIRECTORY NAME',
-    help='name of directory created for virtual screening')
+    help='Name of directory where first round was run. Default: %s'%default_first_round_dir)
+
+parser.add_argument('-l',
+    dest='csvfile_l',
+    default=default_csvfile_l,
+    metavar='CSVFILE',
+    help='Name of csvfile used for the compounds. Default: %s'%default_csvfile_l)
+
+parser.add_argument('-v',
+    dest='vsdir',
+    default=default_vsdir,
+    metavar='FOLDER NAME',
+    help='Name of directory created for virtual screening. Default: %s'%default_vsdir)
 
 args = parser.parse_args()
-vsdir = args.vsdir
 
+first_round_dir = args.first_round_dir
+if not os.path.isdir(first_round_dir):
+    sys.exit('Directory %s specified for first round does not exist'%first_round_dir)
+elif os.path.relpath(first_round_dir) == '.':
+    sys.exit('Directory specified for first round should be different from current dir.!')
+
+vsdir = os.path.relpath(first_round_dir+'/'+args.vsdir)
 if not os.path.isdir(vsdir):
-    sys.exit('Working directory %s does not exist'%vsdir)
+    sys.exit('VS directory %s does not exist'%vsdir)
 
-df_compounds = pd.read_csv(args.csvfile_l)
+csvfile_l = os.path.relpath(first_round_dir+'/'+args.csvfile_l)
+df_compounds = pd.read_csv(csvfile_l)
+
+compound_dir = first_round_dir+'/'+args.compound_dir
+if not os.path.isdir(compound_dir):
+    sys.exit('Compounds folder %s does not exist'%compound_dir)
+
 csvfiles = glob(vsdir+'/*.csv')
 ncsvfiles = len(csvfiles)
 
@@ -58,11 +86,11 @@ for prgm in programs:
 
     target_columns = [col for col in df.columns.values if col.startswith('target')]
     df['target_best'] = df[target_columns].min(axis=1)
-
     if 'isomer' in columns_to_keep:
         df = df.merge(df_compounds, on=['ligID', 'isomer'])
     else:
         df = df.merge(df_compounds, on=['ligID'])
+    df['mol2file'] = df['mol2file'].apply(lambda x: os.path.relpath(first_round_dir+'/'+x))
 
     df_best = df.nsmallest(args.nligs,'target_best').sort_values(by='ligID')
     df_best[columns_to_keep].to_csv('compounds.csv', index=False)
