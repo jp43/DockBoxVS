@@ -2,6 +2,7 @@
 import os
 import sys
 import shutil
+import math
 from glob import glob
 import argparse
 
@@ -10,6 +11,7 @@ import pandas as pd
 import nwalign as nw
 
 from mdkit.utility import mol2
+from mdkit.utility import utils
 from dockbox import pyqcprot
 
 residues_3_to_1 = {'ALA': 'A',
@@ -65,12 +67,6 @@ parser.add_argument('-all-isomers',
     help='Select best poses over all the isomers. If not specified, extract best pose separately for every isomer. A "%s/%s/%s" architecture \
 of the folders is assumed'%(ligdir_prefix,tardir_prefix,isodir_prefix))
 
-parser.add_argument('-cross',
-    dest='cross_docking',
-    action='store_true',
-    default=False,
-    help='Allow comparison of poses over different targets. Must be used with the -all-target option')
-
 parser.add_argument('-csvl',
     type=str,
     dest='csvfile_l',
@@ -81,7 +77,7 @@ parser.add_argument('-csvr',
     dest='csvfile_r',
     default=None,
     metavar='FILENAME',
-    help='Filename containing info about targets. If none, will look for a receptor file in the "poses" folders. Default: none')
+    help='Filename containing info about targets. If none, will look for a receptor file in the "poses" folders.  Default: none')
 
 parser.add_argument('-cutoff',
     dest='cutoff',
@@ -132,19 +128,25 @@ group.add_argument('-sbcd',
 # update parsers with arguments
 args = parser.parse_args()
 
-def compute_rmsd(file1, file2, file1_r=None, file2_r=None):
-    """Compute RMSD between 2 poses. If files with protein structures are provided, first perform the alignment on the protein prior to RMSD."""
+def compute_rmsd(file1, file2, rotmat=np.eye(3), trans1=np.zeros(3), trans2=np.zeros(3)):
+    """Compute RMSD between 2 poses"""
 
     # load coordinates of first pose (non-hydrogen atoms)
     coords1 = mol2.get_coordinates(file1, keep_h=False)
     coords1 = np.array(coords1)
+    natoms = coords1.shape[0]
+
+    coords1_rot = np.empty_like(coords1)
+    for idx in range(natoms):
+        coords1t = coords1[idx,:] + trans1
+        coords1t = coords1t[:,np.newaxis]
+        coords1_rot[idx,:] = np.dot(rotmat, coords1t).flatten() - trans2
 
     # load coordinates of second pose (non-hydrogen atoms)
     coords2 = mol2.get_coordinates(file2, keep_h=False)
     coords2 = np.array(coords2)
 
-    natoms = coords1.shape[0]
-    rmsd = np.sqrt(np.sum((coords1-coords2)**2)/natoms)
+    rmsd = np.sqrt(np.sum((coords1_rot-coords2)**2)/natoms)
     return rmsd
 
 def check_architecture(directory):
@@ -238,6 +240,171 @@ def check_directories(dirs):
 
     return iscwd, isligID, istargetID, isisomerID
 
+def add_names(csvfile, df):
+
+    df_ligands = pd.read_csv(csvfile)
+
+    if 'isomer' in df_ligands:
+        df_ligands = df_ligands[df_ligands['isomer']==1]
+
+    df = df.merge(df_ligands[['ligID', 'name']], on='ligID')
+    return df
+
+def get_total_residue_number(filename):
+
+    indices = []
+    nresidues = 0
+
+    with open(filename, 'r') as pdbf:
+        for line in pdbf:
+
+            if line.startswith('ATOM'):
+                resnum = line[22:26].strip()
+
+                if resnum not in indices:
+                    indices.append(resnum)
+                    nresidues += 1
+    return nresidues
+
+def get_sequence_from_PDB(filename):
+
+    indices = []
+    sequence = ''
+    with open(filename, 'r') as pdbf:
+        for line in pdbf:
+
+            if line.startswith('ATOM'):
+                resnum = line[22:26].strip()
+                resname = line[17:20].strip()
+
+                if resname in equivalent_residues:
+                    resname = equivalent_residues[resname]
+
+                if resnum not in indices and resname in residues_3_to_1:
+                    sequence += residues_3_to_1[resname]
+                    indices.append(resnum)
+
+    return sequence, indices
+
+def get_residues_coordinates(filename, indices):
+
+    indices_new = []
+    coords = []
+
+    with open(filename, 'r') as pdbf:
+        for line in pdbf:
+            if line.startswith('ATOM'):
+
+                resnum = line[22:26].strip()
+                resname = line[17:20].strip()
+                atomname = line[12:16].strip()
+
+                if resnum not in indices_new and resnum in indices:
+                    coords.append([])
+                    indices_new.append(resnum)
+
+                if resnum in indices and resname[0] != 'H':
+                    x = float(line[30:38])
+                    y = float(line[38:46])
+                    z = float(line[46:54])
+                    coords[-1].append([atomname, x, y, z])
+
+    return coords, indices_new
+
+def get_rmsd_rotation_and_translations(file1, file2):
+
+    nres1 = get_total_residue_number(file1)
+    nres2 = get_total_residue_number(file2)
+
+    seq1, ind1 = get_sequence_from_PDB(file1)
+    seq2, ind2 = get_sequence_from_PDB(file2)
+
+    alignment = nw.global_align(seq1, seq2)
+
+    nalign = len(alignment[0])
+    nresidues_min = min(len(seq1), len(seq2))
+
+    ind1new = []
+    ind2new = []
+    idx1, idx2 = 0, 0
+
+    for idx in range(nalign):
+        if (idx < nresidues_min) and seq1[idx] == seq2[idx] and seq1[idx] != '-':
+            ind1new.append(ind1[idx1])
+            ind2new.append(ind2[idx2])
+        if (idx < len(seq1)) and seq1[idx] != '-':
+            idx1 += 1
+        if (idx < len(seq2)) and seq2[idx] != '-':
+            idx2 += 1
+
+    ind1 = ind1new
+    ind2 = ind2new
+
+    frac1 = len(ind1)*100.0/nres1
+    frac2 = len(ind2)*100.0/nres2
+    #print frac1, frac2
+    #TODO: add a threshold for the number of residues considered
+
+    # get coordinates of specific residues 
+    coords1, ind1 = get_residues_coordinates(file1, ind1)
+    coords2, ind2 = get_residues_coordinates(file2, ind2)
+
+    new_coords1 = []
+    new_coords2 = []
+
+    # check if there is consistency in atom names
+    nresidues1 = len(coords1)
+    for idx in range(nresidues1):
+        coords1_res = coords1[idx]
+        coords2_res = coords2[idx]
+
+        atomnames1 = [item[0] for item in coords1_res]
+        atomnames2 = [item[0] for item in coords2_res]
+        if set(atomnames1) != set(atomnames2):
+            sys.exit("Inconsistency found in residue %s in file %s and residue %s in file %s! Missing atom suspected..."%(ind1[idx],file1,ind2[idx],file2))
+
+        # create new coordinates
+        for an1, x1, y1, z1 in coords1_res:
+            for an2, x2, y2, z2 in coords2_res:
+                if an1 == an2:
+                    new_coords1.append([x1, y1, z1])
+                    new_coords2.append([x2, y2, z2])
+                    break
+
+    new_coords1 = np.array(new_coords1).T
+    new_coords2 = np.array(new_coords2).T
+
+    rotation = np.zeros(9)
+    trans1 = -new_coords1[:,0]
+    trans2 = -new_coords2[:,0]
+
+    rmsd = pyqcprot.CalcRMSDRotationalMatrix(new_coords1, new_coords2, rotation, None)
+
+    rotation = rotation.reshape((3, 3))
+    trans1 += new_coords1[:,0]
+    trans2 += new_coords2[:,0]
+
+    return rotation, trans1, trans2
+
+def get_rmsd_rotation_and_translations_all_targets(files_r):
+    
+    rmsd_rot_trans = {}
+    for key1 in files_r:
+        rmsd_rot_trans[key1] = {}
+
+        for key2 in files_r:
+            if key1 == key2:
+                rotation = np.eye(3)
+                trans1 = np.zeros(3)
+                trans2 = np.zeros(3)
+            else:
+                file1 = files_r[key1]
+                file2 = files_r[key2]
+                rotation, trans1, trans2 = get_rmsd_rotation_and_translations(file1, file2)
+            rmsd_rot_trans[key1][key2] = [rotation, trans1, trans2]
+
+    return rmsd_rot_trans
+
 dirs = []
 for dir in args.dirs:
     if os.path.isdir(dir+'/poses'):
@@ -246,23 +413,20 @@ for dir in args.dirs:
         raise ValueError('directory '+dir+'/poses does not exist!')
 iscwd, isligID, istargetID, isisomerID = check_directories(dirs)
 
-if args.csvfile_r:
-    if os.path.isfile(args.csvfile_r):
-        if istargetID:
-            df_targets = pd.read_csv(args.csvfile_r)
-            csvfile_r_dir = os.path.dirname(args.csvfile_r)
-            # update relative paths
-            for column in ['file_origin', 'pdbfile']:
-                df_targets[column] =  df_targets[column].apply(lambda x: os.path.relpath(csvfile_r_dir+'/'+x))
-        else:
-            sys.exit(".csv file %s specified for targets but target ID not found from directories!"%args.csvfile_r)
-    else:
-        sys.exit("File %s does not exist!"%args.csvfile_r)
-else:
-    # check if .pdb files are there
+# check if info related to targets is there!
+if not args.csvfile_r:
     for dir in args.dirs:
+        # check if .pdb files are there
         if not os.path.isdir(dir+'/poses/rec.pdb'):
             sys.exit("PDB file rec.pdb for receptor not found in %s!"%dir)
+elif os.path.isfile(args.csvfile_r):
+    df_targets = pd.read_csv(args.csvfile_r)
+    csvfile_r_dir = os.path.dirname(args.csvfile_r)
+    # update relative paths
+    for column in ['file_origin', 'pdbfile']:
+        df_targets[column] =  df_targets[column].apply(lambda x: os.path.relpath(csvfile_r_dir+'/'+x))
+else:
+    sys.exit("File %s does not exist!"%args.csvfile_r)
 
 # check options relative to best poses extraction
 scoring_functions_all = []
@@ -336,13 +500,15 @@ for jdx, dir in enumerate(dirs):
                 if isisomerID:
                     info_dir['isomerID'].append(isomerID)
                 
-                if args.csvfile_r:
+                # get the filename of the corresponding receptor file
+                if not args.csvfile_r:
+                    file_r = os.path.relpath(posedir+'/rec.pdb')
+                else:
                     row = df_targets[df_targets['targetID']==targetID]
                     file_r = row['pdbfile'].values[0]
-                else:
-                    file_r = os.path.relpath(posedir+'/rec.pdb')
                 info_dir['file_r'].append(file_r)
 
+                # update the dictionnary of targets
                 if targetID not in files_r:
                     files_r[targetID] = file_r
 
@@ -372,13 +538,6 @@ for jdx, dir in enumerate(dirs):
         df_dir = df_dir[df_dir['instance'].isin(args.docking_programs)]
     poses.append(df_dir)
 
-def add_names(csvfile, df):
-    df_ligands = pd.read_csv(csvfile)
-    if 'isomer' in df_ligands:
-        df_ligands = df_ligands[df_ligands['isomer']==1]
-    df = df.merge(df_ligands[['ligID', 'name']], on='ligID')
-    return df
-
 if poses:
     poses = pd.concat(poses).reset_index()
     if args.csvfile_l and isligID:
@@ -386,205 +545,71 @@ if poses:
 else:
     sys.exit("No poses to extract!")
 
-def get_total_residue_number(filename):
-
-    indices = []
-    nresidues = 0
-    with open(filename, 'r') as pdbf:
-        for line in pdbf:
-            if line.startswith('ATOM'):
-                resnum = line[22:26].strip()
-                if resnum not in indices:
-                    indices.append(resnum)
-                    nresidues += 1
-    return nresidues
-
-def get_sequence_from_PDB(filename):
-
-    indices = []
-    sequence = ''
-    with open(filename, 'r') as pdbf:
-        for line in pdbf:
-            if line.startswith('ATOM'):
-                resnum = line[22:26].strip()
-                resname = line[17:20].strip()
-                if resname in equivalent_residues:
-                    resname = equivalent_residues[resname]
-                if resnum not in indices and resname in residues_3_to_1:
-                    sequence += residues_3_to_1[resname]
-                    indices.append(resnum) 
-    return sequence, indices
-
-def get_residues_coordinates(filename, indices):
-
-    indices_new = []
-    coords = []
-    with open(filename, 'r') as pdbf:
-        for line in pdbf:
-            if line.startswith('ATOM'):
-                resnum = line[22:26].strip()
-                resname = line[17:20].strip()
-                atomname = line[12:16].strip()
-                if resnum not in indices_new and resnum in indices:
-                    coords.append([])
-                    indices_new.append(resnum)
-                if resnum in indices and resname[0] != 'H':
-                    x = line[30:38]
-                    y = line[38:46]
-                    z = line[46:54]
-                    coords[-1].append([atomname, x, y, z ])
-    return coords, indices_new
-
-def compute_rmsd_rotmat(file1, file2):
-
-    nres1 = get_total_residue_number(file1)
-    nres2 = get_total_residue_number(file2)
-
-    seq1, ind1 = get_sequence_from_PDB(file1)
-    seq2, ind2 = get_sequence_from_PDB(file2)
-
-    alignment = nw.global_align(seq1, seq2)
-
-    nalign = len(alignment[0])
-    nresidues_min = min(len(seq1), len(seq2))
-
-    ind1new = []
-    ind2new = []
-    idx1, idx2 = 0, 0
-
-    for idx in range(nalign):
-        if (idx < nresidues_min) and seq1[idx] == seq2[idx] and seq1[idx] != '-':
-            ind1new.append(ind1[idx1])
-            ind2new.append(ind2[idx2])
-        if (idx < len(seq1)) and seq1[idx] != '-':
-            idx1 += 1
-        if (idx < len(seq2)) and seq2[idx] != '-':
-            idx2 += 1
-
-    ind1 = ind1new
-    ind2 = ind2new
-
-    frac1 = len(ind1)*100.0/nres1 
-    frac2 = len(ind2)*100.0/nres2
-    #print frac1, frac2 #TODO: add a threshold for the number of residues considered
-
-    # get coordinates of specific residues 
-    coords1, ind1 = get_residues_coordinates(file1, ind1)
-    coords2, ind2 = get_residues_coordinates(file2, ind2)
-
-    new_coords1 = []
-    new_coords2 = []
-
-    # check if there is consistency in atom names
-    nresidues1 = len(coords1)
-    for idx in range(nresidues1):
-        coords1_res = coords1[idx]
-        coords2_res = coords2[idx]
-
-        atomnames1 = [item[0] for item in coords1_res]
-        atomnames2 = [item[0] for item in coords2_res]
-        if set(atomnames1) != set(atomnames2):
-            sys.exit("Inconsistency found in residue %s in file %s and residue %s in file %s! Missing atom suspected..."%(ind1[idx],file1,ind2[idx],file2))
-
-        # create new coordinates
-        for an1, x1, y1, z1 in coords1_res:
-            for an2, x2, y2, z2 in coords2_res:
-                if an1 == an2:
-                    new_coords1.append(map(float, [x1, y1, z1]))
-                    new_coords2.append(map(float, [x2, y2, z2]))
-                    break
-    
-    new_coords1 = np.array(new_coords1).T
-    new_coords2 = np.array(new_coords2).T
-    rotation = np.zeros(9)
-
-    new_coords1_old = np.copy(new_coords1)
-    new_coords2_old = np.copy(new_coords2)
-
-    # build rotational matrix
-    rmsd = pyqcprot.CalcRMSDRotationalMatrix(new_coords1, new_coords2, rotation, None)
-
-    trans1 = new_coords1[:,0] - np.copy(new_coords1_old[:,0])
-    trans2 = new_coords2[:,0] - np.copy(new_coords2_old[:,0])
-    trans = trans2 - trans1
-
-    return rotation, trans
-
-def generate_targets_rotmat(files_r):
-
-    rotmats = {}
-    for key1 in files_r:
-        rotmats[key1] = {}
-        for key2 in files_r:
-            if key1 == key2:
-                rotation = np.eye(3).reshape(9)
-                translation = np.zeros(3)
-            else:
-                file1 = files_r[key1]
-                file2 = files_r[key2]
-                rotation, translation = compute_rmsd_rotmat(file1, file2)
-            rotmats[key1][key2] = [rotation, translation]
-    return rotmats
-
-if (args.sbcd or args.cd) and args.cross_docking and istargetID:
-    rotmats = generate_targets_rotmat(files_r) 
-    sys.exit()
-
-#if args.sf:
-#    poses['score_multi'] = poses[scoring_functions].sum(axis=1)
-#    if args.cross_docking and (args.cd or args.sbcd):   
-#    else:
-# combine results over all targets.
-
 if args.combine_targets and istargetID:
     groupby_columns = []
     if isligID:
         groupby_columns += ['ligID']
     if isisomerID:
         groupby_columns += ['isomerID']
-    if args.sbcd:
-        if not args.cross_docking:
-            groupby_columns += ['targetID']
-        poses_groupby = poses.groupby(groupby_columns)
 
+    if args.sbcd or args.cd:
+        rmsd_rot_trans = get_rmsd_rotation_and_translations_all_targets(files_r)
         best_poses = []
-        for sf in scoring_functions:
-            best_poses_sf = poses.loc[poses_groupby[sf].idxmin]
-            best_poses_sf = best_poses_sf.drop(['index', 'index_pose'], axis=1)
-            new_columns_names = [] # renaming columns according to the scoring function
-            for col in best_poses_sf.columns.values:
-                if col in ['ligID', 'isomerID'] or (not args.cross_docking and col=='targetID'):
-                    new_columns_names.append(col)
-                else:
-                    new_columns_names.append(col + '_' + sf)
-            best_poses_sf.columns = new_columns_names
-            best_poses.append(best_poses_sf)
+        if args.sbcd:
+            poses_groupby = poses.groupby(groupby_columns)
+            for sf in scoring_functions:
+                best_poses_sf = poses.loc[poses_groupby[sf].idxmin]
+                best_poses_sf = best_poses_sf.drop(['index', 'index_pose'], axis=1)
 
-        # merge best poses in single dataframe
+                new_columns_names = [] # renaming columns according to the scoring function
+                for col in best_poses_sf.columns.values:
+                    if col in ['ligID', 'isomerID']:
+                        new_columns_names.append(col)
+                    else:
+                        new_columns_names.append(col + '_' + sf)
+                best_poses_sf.columns = new_columns_names
+                best_poses.append(best_poses_sf)
+        else:
+            for prgm in args.cd:
+                poses_prgm = poses[poses['program']==prgm]
+                poses_groupby = poses_prgm.groupby(groupby_columns)
+        
+                best_poses_prgm = poses_prgm.loc[poses_groupby['score'].idxmin]
+                best_poses_sf = best_poses_prgm.drop(['index', 'index_pose'], axis=1)
+ 
+                new_columns_names = [] # renaming columns according to the scoring function
+                for col in best_poses_sf.columns.values:
+                    if col in ['ligID', 'isomerID']:
+                        new_columns_names.append(col)
+                    else:
+                        new_columns_names.append(col + '_' + sf)
+                best_poses_sf.columns = new_columns_names
+                best_poses.append(best_poses_sf)
+
+        # merge best poses into single dataframe
         best_poses_merged = best_poses[0]
         for best_pose_sf in best_poses[1:]:
             best_poses_merged = best_poses_merged.merge(best_poses_sf, on=groupby_columns)
+        print best_poses_merged
+        sys.exit()
 
-        sf_first = scoring_functions[0]
+        if args.sbcd:
+            programs = scoring_functions
+        else:
+            programs = args.cd
+
+        sf_first = programs[0]
         # try to find if there is a consensus
-        for sf in scoring_functions[1:]:
-            if args.cross_docking:
-                best_poses_merged['rmsd_'+sf_first+'_'+sf] = \
-best_poses_merged.apply(lambda row: compute_rmsd(row['file_l_'+sf_first], row['file_l_'+sf], file1_r=row['file_r_'+sf_first], file2_r=row['file_r_'+sf]), axis=1)
-            else:
-                best_poses_merged['rmsd_'+sf_first+'_'+sf] = \
-best_poses_merged.apply(lambda row: compute_rmsd(row['file_l_'+sf_first], row['file_l_'+sf]), axis=1)
-
+        for sf in programs[1:]:
+            best_poses_merged['rmsd_'+sf_first+'_'+sf] = best_poses_merged.apply(lambda row: compute_rmsd(row['file_l_'+sf_first], row['file_l_'+sf],
+            rotmat=rmsd_rot_trans[row['targetID_'+sf_first]][row['targetID_'+sf]][0], \
+            trans1=rmsd_rot_trans[row['targetID_'+sf_first]][row['targetID_'+sf]][1], \
+            trans2=rmsd_rot_trans[row['targetID_'+sf_first]][row['targetID_'+sf]][2]), axis=1)
+            #best_poses_merged['rmsd_'+sf_first+'_'+sf] = best_poses_merged.apply(lambda row: compute_rmsd(row['file_l_'+sf_first], row['file_l_'+sf]), axis=1)
         rmsd_columns = [col for col in best_poses_merged.columns.values if col.startswith('rmsd')]
         best_poses_merged = best_poses_merged.assign(consensus=(best_poses_merged[rmsd_columns]<=args.cutoff).all(axis=1))
-
         print best_poses_merged
-        
-        sys.exit()
-        #pd.merge(best_poses, suffixes=scoring_functions)
-
-    sys.exit()
-sys.exit()
+        sys.exit()        
 
 #    else: 
 #        groupby_columns = []
@@ -639,7 +664,6 @@ if args.combine_targets and istargetID:
 
 if best_poses is not None:
     best_poses[features_csv].to_csv(args.resultsdir+'/best_poses.csv', index=False, float_format='%.3f')
-
     for idx, row in best_poses.iterrows():
         newdir = args.resultsdir + '/' + '/'.join(row[features_ids])
         if not os.path.isdir(newdir):
