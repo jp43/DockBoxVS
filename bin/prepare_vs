@@ -81,6 +81,27 @@ parser.add_argument('-w',
     metavar='DIRECTORY NAME',
     help='name of directory created for virtual screening')
 
+group.add_argument('-sf',
+    dest='sf',
+    nargs='+',
+    action='append',
+    metavar='FUNC',
+    help='Scoring functions used to extract the best pose (combination of scores)')
+
+group.add_argument('-cd',
+    dest='cd',
+    nargs='+',
+    action='append',
+    metavar='PRGM',
+    help='Docking programs used for standard consensus docking')
+
+group.add_argument('-sbcd',
+    dest='sbcd',
+    nargs='+',
+    action='append',
+    metavar='FUNC',
+    help='Scoring functions used for score-based consensus docking')
+
 group = parser.add_mutually_exclusive_group(required=False)
 
 for sch in known_schedulers:
@@ -213,6 +234,26 @@ if args.level in [2, 3]:
     else:
         nligands_per_job = args.nligands_per_job
 
+if args.sbcd:
+    scoring_functions = args.sbcd
+    programs_consensus = args.sbcd
+    if len(args.sbcd) < 2:
+        raise ValueError('Number of functions for score-based consensus docking should be at least 2!')
+    resolve_with = args.sbcd[0] # used to decide which pose to extract when selecting over all isomers
+elif args.cd:
+    scoring_functions = None
+    programs_consensus = args.cd
+    if len(args.cd) < 2:
+        raise ValueError('Number of programs for consensus docking should be at least 2!')
+    resolve_with = 'score_'+args.cd[0]
+elif args.sf:
+    scoring_functions = args.sf
+    programs_consensus = None
+    if len(scoring_functions) == 1:
+        resolve_with = scoring_functions[0]
+    else:
+        resolve_with = '_'.join(scoring_functions)
+
 scheduler = None
 exe = None
 for sch in known_schedulers:
@@ -266,6 +307,11 @@ elif exts[0] == '.csv': # if input files is the csvfile
     is_csvfile_r = True
 else:
     raise IOError("Extension of files used with -r option not recognized!")
+
+if ntargets == 1:
+    use_target_folder = False
+else:
+    use_target_folder = True
 
 exts_l = list(set([os.path.splitext(ff)[1] for ff in args.input_files_l]))
 if len(exts_l) != 1: # if more than one extension provided
@@ -431,10 +477,14 @@ for jdx in range(nligands):
     ligid = ligandids[jdx]
     for idx in range(ntargets):
         recid = targetids[idx]
-        if use_isomer_folder:
+        if use_isomer_folder and use_target_folder:
             workdir = rundir + '/' + ligid + '/' + recid + '/isomer' + str(isomers[jdx])
-        else:
+        elif use_isomer_folder:
+            workdir = rundir + '/' + ligid + '/isomer' + str(isomers[jdx])
+        elif use_target_folder:
             workdir = rundir + '/' + ligid + '/' + recid
+        else:
+            workdir = rundir + '/' + ligid
 
         if level is None or level in [0, 1, 2]:
             os.makedirs(workdir)
@@ -473,7 +523,9 @@ if level is not None:
     submit_all_filename = scriptdir + '/submit_all.sh'
 
 if level == 0:
-    dirs = rundir + '/lig*/target*'
+    dirs = rundir + '/lig*'
+    if use_target_folder:
+        dirs += '/target*'
     if use_isomer_folder:
         dirs += '/isomer*'
     # write script to submit all jobs
@@ -491,7 +543,9 @@ done\n"""%locals()
 elif level == 1:
     for jdx in range(nligands):
         ligid = str(ligandids[jdx])
-        dirs = rundir + '/' + ligid+ '/target*'
+        dirs = rundir + '/' + ligid
+        if use_target_folder:
+            dirs += '/target*'
         if use_isomer_folder:
             dirs += '/isomer' + str(isomers[jdx])
         script = make_header(scheduler_options, scheduler, jobname=ligid)
@@ -534,7 +588,9 @@ elif level in [2, 3]:
         if level == 2:
             workdirs = []
             for jdx in range(idx_first, idx_last+1):
-                dir = args.rundir + '/' + ligandids[jdx] + '/target*'
+                dir = args.rundir + '/' + ligandids[jdx]
+                if use_target_folder:
+                    dirs += '/target*'
                 if use_isomer_folder:
                     dir += '/isomer' + str(isomers[jdx])
                 workdirs.append(dir)
@@ -551,14 +607,21 @@ done\n"""%locals()
         elif level == 3:
             ligandids_str = " ".join(["'%s'"%id for id in ligandids[idx_first:idx_last+1]])
             targetids_str = " ".join(["'%s'"%id for id in sorted(list(set(targetids)))])
+            if use_target_folder:
+                create_target_line = '\n    workdir=$dir_l/${targetids[$id_r]}\n    mkdir $workdir'
+            else:
+                create_target_line = '\n    workdir=$dir_l'
             isomerids_str = ' '.join(["'%s'"%isomers[jdx] for jdx in range(idx_first,idx_last+1)])
             if use_isomer_folder:
-                create_isomerdir_line = '\nworkdir=$workdir/isomer${isomerids[$id_l]}\nmkdir $workdir'
+                create_isomerdir_line = '\n    workdir=$workdir/isomer${isomerids[$id_l]}\n    mkdir $workdir'
             else:
                 create_isomerdir_line = ''
             files_l_str = " ".join(["'%s'"%ff for ff in input_files_l_rel[idx_first:idx_last+1]])
             files_r_str = " ".join(["'%s'"%ff for ff in input_files_r_rel])
             files_c_str = " ".join(["'%s'"%ff for ff in config_files_rel])
+
+            
+
             script += """\nset -e
 curdir=`pwd`
 
@@ -583,11 +646,7 @@ for id_l in `seq 0 $((nfiles_l-1))`; do
   rm -rf $dir_l
   mkdir $dir_l
   line=${ligids[$id_l]},${isomerids[$id_l]}
-  for id_r in `seq 0 $((nfiles_r-1))`; do
-    dir_r=${targetids[$id_r]}
-    workdir=$dir_l/$dir_r
-    # make directories
-    mkdir $workdir%(create_isomerdir_line)s
+  for id_r in `seq 0 $((nfiles_r-1))`; do%(create_target_line)s%(create_isomerdir_line)s
     cd $workdir
     # run dockbox command
     rundbx -f ${files_c[$id_r]} -l ${files_l[$id_l]} -r ${files_r[$id_r]} &> /dev/null

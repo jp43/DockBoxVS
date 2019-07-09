@@ -9,6 +9,13 @@ import pandas as pd
 #TODO: add the possibilty to prepare scripts for torque and ll
 parser = argparse.ArgumentParser(description="Check VS!")
 
+parser.add_argument('-c',
+    dest='cdir',
+    type=str,
+    default='compounds',
+    metavar='DIRECTORY NAME',
+    help='name of directory created for compounds')
+
 parser.add_argument('-w',
     dest='vsdir',
     type=str,
@@ -20,7 +27,7 @@ args = parser.parse_args()
 vsdir = args.vsdir
 
 tosubdir = 'to_submit_' + vsdir
-compound_dir = 'compounds'
+compound_dir = args.cdir
 
 if not os.path.isdir(vsdir):
     sys.exit('Working directory %s does not exist'%vsdir)
