@@ -6,13 +6,14 @@ import stat
 import argparse
 from glob import glob
 import subprocess
+
 import ConfigParser
 import pandas as pd
 
 from mdkit.amber.ambertools import load_PROTON_INFO
 from mdkit.amber.ambertools import load_atomic_ions
 
-equivalent_residues = {'CYM': 'CYS', 'LYN': 'LYS'}
+equivalent_residues = {'CYM': 'CYS', 'LYN': 'LYS', 'GLZ': 'GLY', 'ASQ': 'ASP'}
 
 known_formats = ['.pdb']
 parser = argparse.ArgumentParser(description="Prepare target files for Virtual Screening (2nd stage)")

@@ -53,14 +53,21 @@ parser.add_argument('-f',
     default='config.ini',
     help='config file: .ini')
 
+parser.add_argument('-cutoff',
+    dest='cutoff',
+    type=float,
+    metavar='RMSD_VALUE',
+    default=2.0,
+    help='RMSD cutoff used for consensus docking or score-based consensus docking. Default: 2.0 A')
+
 parser.add_argument('-level',
     dest='level',
     type=int,
     metavar='INT',
-    default=None,
+    required=True,
     help='Level of Virtual Screening considered. From 0 (docking with a few compounds) to 3 (VS with a large number of compounds)')
 
-parser.add_argument('--nligands-per-job',
+parser.add_argument('-nligands-per-job',
     dest='nligands_per_job',
     type=int,
     metavar='INT',
@@ -81,21 +88,21 @@ parser.add_argument('-w',
     metavar='DIRECTORY NAME',
     help='name of directory created for virtual screening')
 
-group.add_argument('-sf',
+parser.add_argument('-sf',
     dest='sf',
     nargs='+',
     action='append',
     metavar='FUNC',
     help='Scoring functions used to extract the best pose (combination of scores)')
 
-group.add_argument('-cd',
+parser.add_argument('-cd',
     dest='cd',
     nargs='+',
     action='append',
     metavar='PRGM',
     help='Docking programs used for standard consensus docking')
 
-group.add_argument('-sbcd',
+parser.add_argument('-sbcd',
     dest='sbcd',
     nargs='+',
     action='append',
@@ -230,29 +237,9 @@ args = parser.parse_args()
 
 if args.level in [2, 3]:
     if args.nligands_per_job is None:
-        raise ValueError('nligands_per_job option should be specified with VS lvl 2 or 3!')
+        raise ValueError('-nligands-per-job option should be specified with VS lvl 2 or 3!')
     else:
         nligands_per_job = args.nligands_per_job
-
-if args.sbcd:
-    scoring_functions = args.sbcd
-    programs_consensus = args.sbcd
-    if len(args.sbcd) < 2:
-        raise ValueError('Number of functions for score-based consensus docking should be at least 2!')
-    resolve_with = args.sbcd[0] # used to decide which pose to extract when selecting over all isomers
-elif args.cd:
-    scoring_functions = None
-    programs_consensus = args.cd
-    if len(args.cd) < 2:
-        raise ValueError('Number of programs for consensus docking should be at least 2!')
-    resolve_with = 'score_'+args.cd[0]
-elif args.sf:
-    scoring_functions = args.sf
-    programs_consensus = None
-    if len(scoring_functions) == 1:
-        resolve_with = scoring_functions[0]
-    else:
-        resolve_with = '_'.join(scoring_functions)
 
 scheduler = None
 exe = None
@@ -295,12 +282,15 @@ if exts[0] == '.pdb': # if input files are pdbfiles
 
     for jdx, file_r in enumerate(input_files_r):
         targetids.append('target'+(nid_digits-len(str(jdx+1)))*'0' + str(jdx+1))
+    csvfile_r = None
     is_csvfile_r = False
 elif exts[0] == '.csv': # if input files is the csvfile
     if len(args.input_files_r) != 1:
         raise ValueError("More than 1 csvfile specified with -r option.")
 
-    df_targets = pd.read_csv(args.input_files_r[0])
+    csvfile_r = os.path.abspath(args.input_files_r[0])
+    df_targets = pd.read_csv(csvfile_r)
+
     input_files_r = [os.path.abspath(ff) for ff in list(df_targets['pdbfile'])]
     ntargets = len(input_files_r)
     targetids = list(df_targets['targetID'])
@@ -336,6 +326,7 @@ if exts_l[0] == '.mol2': # if input files are .mol2
             ligandids.append('lig'+(nid_digits-len(str(jdx+1)))*'0' + str(jdx+1))
         else:
             raise IOError("Every ligand file should contain at least 1 structure, or use the prepare_compounds routine!")
+    csvfile_l = None
     is_csvfile_l = False
     use_isomer_folder = False
 
@@ -343,7 +334,9 @@ elif exts_l[0] == '.csv': # if input files is a csvfile
     if len(args.input_files_l) != 1:
         raise ValueError("More than 1 csvfile specified with -l option.")
 
-    df_ligands = pd.read_csv(args.input_files_l[0])
+    csvfile_l = os.path.abspath(args.input_files_l[0])
+    df_ligands = pd.read_csv(csvfile_l)
+
     input_files_l = [os.path.abspath(ff) for ff in list(df_ligands['mol2file'])]
     nligands = len(input_files_l)
     ligandids = list(df_ligands['ligID'])
@@ -360,16 +353,53 @@ else:
 if not os.path.isfile(args.config_file):
     raise ValueError("Config file %s not found!"%args.config_file)
 
-if level == 3: # check if only one program was used for docking
-    config = ConfigParser.SafeConfigParser()
-    config.read(args.config_file)
-    if config.has_option('DOCKING', 'program'):
-        instances = config.get('DOCKING', 'program').lower()
-        instances = map(str.strip, instances.split(','))
-        if len(instances) == 1:
-            instance = instances[0]
-        else:
-            sys.exit("More than one docking program cannot be used with level-3 VS!")
+config = ConfigParser.SafeConfigParser()
+config.read(args.config_file)
+
+# get names of docking programs from config file
+if config.has_option('DOCKING', 'program'):
+    instances_config = config.get('DOCKING', 'program').lower()
+    instances_config = map(str.strip, instances_config.split(','))
+else:
+    instances_config = None
+# get names of scoring functions from config file
+if config.has_option('RESCORING', 'program'):
+    scoring_functions_config = config.get('RESCORING', 'program').lower()
+    scoring_functions_config = map(str.strip, scoring_functions_config.split(','))
+else:
+    scoring_functions_config = None
+
+extraction_methods = [('SBCD', args.sbcd), ('CD', args.cd), ('SF', args.sf)]
+
+# check if scoring functions
+for method, scoring_functions_list in extraction_methods:
+    if scoring_functions_list:
+        for scoring_functions in scoring_functions_list:
+            for sf in scoring_functions:
+                if method in ['SBCD', 'SF'] and (sf not in scoring_functions_config) and not (sf == 'score' and method == 'SF'):
+                    sys.exit("Scoring function %s needed with %s not specified in the config file!"%(sf, method))
+                elif method == 'CD' and sf not in instances_config:
+                    sys.exit("Docking instance %s needed with %s not specified in the config file!"%(sf, method))
+
+if args.level == 3:
+    if not is_csvfile_r:
+        sys.exit("Protein information should be provided as a .csv file with VS level 3!")
+
+    extract_dirs = '$dir_l'
+    if use_target_folder:
+        create_target_line = '\n    workdir=$dir_l/${targetids[$id_r]}\n    mkdir $workdir'
+        extract_dirs += '/target*'
+    else:
+        create_target_line = '\n    workdir=$dir_l'
+
+    create_isomerdir_line = ''
+    if use_isomer_folder:
+        create_isomerdir_line = '\n    workdir=$workdir/isomer${isomerids[$id_l]}\n    mkdir $workdir'
+        extract_dirs += '/isomer${isomerids[$id_l]}'
+
+    if csvfile_l:
+        csvfile_l_rel = os.path.relpath(csvfile_l, rundir)
+    csvfile_r_rel = os.path.relpath(csvfile_r, rundir)
 
 def update_config_file(new_config_file, config_file, label_r, csvfile):
     """Update binding site parameters in config file"""
@@ -469,7 +499,9 @@ os.mkdir(configdir)
 config_files = []
 for idx, file_r in enumerate(input_files_r):
     recid = targetids[idx]
+
     new_config_file = configdir + '/' + config_suff + '_%s'%(idx+1) + config_ext
+
     update_config_file(new_config_file, args.config_file, recid, args.sitecsv)
     config_files.append(new_config_file)
 
@@ -607,24 +639,29 @@ done\n"""%locals()
         elif level == 3:
             ligandids_str = " ".join(["'%s'"%id for id in ligandids[idx_first:idx_last+1]])
             targetids_str = " ".join(["'%s'"%id for id in sorted(list(set(targetids)))])
-            if use_target_folder:
-                create_target_line = '\n    workdir=$dir_l/${targetids[$id_r]}\n    mkdir $workdir'
-            else:
-                create_target_line = '\n    workdir=$dir_l'
             isomerids_str = ' '.join(["'%s'"%isomers[jdx] for jdx in range(idx_first,idx_last+1)])
-            if use_isomer_folder:
-                create_isomerdir_line = '\n    workdir=$workdir/isomer${isomerids[$id_l]}\n    mkdir $workdir'
-            else:
-                create_isomerdir_line = ''
+
             files_l_str = " ".join(["'%s'"%ff for ff in input_files_l_rel[idx_first:idx_last+1]])
             files_r_str = " ".join(["'%s'"%ff for ff in input_files_r_rel])
             files_c_str = " ".join(["'%s'"%ff for ff in config_files_rel])
 
-            
+            extract_lines = ''
+            for method, scoring_functions_list in extraction_methods:
+                if scoring_functions_list:
+                    for scoring_functions in scoring_functions_list:
+                        method_lower = method.lower()
+                        results_dir = '${dir_l}_%s_%s'%(method_lower,'_'.join(scoring_functions))
+                        extract_lines += '\n\n  extract_dbx_best_poses -dirs %s -%s %s -all-targets -cutoff %s -r %s -csvr %s'\
+%(extract_dirs,method_lower,' '.join(scoring_functions),args.cutoff,results_dir,csvfile_r_rel) 
+                        if csvfile_l:
+                            extract_lines += " -csvl %s"%csvfile_l_rel
+                        # line to move best poses if they exists
+                        extract_lines += '\n  if [ -d %s/$dir_l ]; then mv %s/$dir_l ${dir_l}_tmp/%s_%s; fi'%(results_dir,results_dir,method_lower,'_'.join(scoring_functions))
+                        # line to move best poses if they exists
+                        extract_lines += '\n  tail -n $lines_to_save %s/best_poses.csv >> %s_%s_%s.csv '%(results_dir,method_lower,'_'.join(scoring_functions),index)
+                        extract_lines += '\n  rm -rf %s'%results_dir
 
             script += """\nset -e
-curdir=`pwd`
-
 # get ids
 declare -a ligids=(%(ligandids_str)s)
 declare -a targetids=(%(targetids_str)s)
@@ -638,29 +675,33 @@ declare -a files_c=(%(files_c_str)s)
 nfiles_l=`echo ${#files_l[@]}`
 nfiles_r=`echo ${#files_r[@]}`
 
-joinedids=$(echo ${targetids[@]} | sed "s/ /,/g")
-echo ligID,isomer,${joinedids[@]} > vs/%(instance)s_%(index)s.csv
+cd %(rundir)s
+rm -rf sbcd_*_%(index)s.csv cd_*_%(index)s.csv sf_*_%(index)s.csv
 
 for id_l in `seq 0 $((nfiles_l-1))`; do
-  dir_l=vs/${ligids[$id_l]}
+  curdir=`pwd`
+  # find ligand ID
+  dir_l=${ligids[$id_l]}
+
+  # make directory
   rm -rf $dir_l
   mkdir $dir_l
-  line=${ligids[$id_l]},${isomerids[$id_l]}
+
+  if [ $id_l -eq 0 ]; then lines_to_save=2; else lines_to_save=1; fi
+
   for id_r in `seq 0 $((nfiles_r-1))`; do%(create_target_line)s%(create_isomerdir_line)s
     cd $workdir
     # run dockbox command
-    rundbx -f ${files_c[$id_r]} -l ${files_l[$id_l]} -r ${files_r[$id_r]} &> /dev/null
+    rundbx -f ${files_c[$id_r]} -l ${files_l[$id_l]} -r ${files_r[$id_r]} 1> /dev/null
     # collect results
-    score=
-    if [ -f %(instance)s/score.out ]; then
-        score=`head -n 1 %(instance)s/score.out`
-    fi
-    line=$line,$score
     cd $curdir
   done
-  echo $line >> vs/%(instance)s_%(index)s.csv
+
   # extract results
+  mkdir ${dir_l}_tmp%(extract_lines)s
+
   rm -rf $dir_l
+  if [ -z "$(ls -A ${dir_l}_tmp)" ]; then rm -rf ${dir_l}_tmp; else mv ${dir_l}_tmp ${dir_l}; fi
 done\n"""%locals()
 
         with open(scriptdir+'/run_vs_%i.'%index+scheduler, 'w') as ff:
