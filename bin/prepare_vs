@@ -9,25 +9,9 @@ from glob import glob
 
 import pandas as pd
 
-known_schedulers = {'sge': 'Sun Grid Engine', 'slurm': 'Slurm Workload Manager'}
-exes = {'sge': 'qsub', 'slurm': 'sbatch'}
+from dockbox_vs import queuing
+from dockbox_vs import utils
 
-# default and mandatory options for schedulers
-default_options = {'sge': {'S': '/bin/bash',
-'o': 'sge-$JOB_ID.out',
-'e': 'sge-$JOB_ID.err',
-'N': 'vs',
-'cwd': '',
-'V': ''},
-'slurm': {'job-name': 'vs',
-'ntasks': '1',
-'cpus-per-task': '1',
-'nodes': '1'}}
-
-mandatory_options = {'sge': ['q'], 'slurm': ['partition', 'time']}
-equivalent_options = {'slurm': {'p': 'partition', 't': 'time', 'j': 'jobname', 'x': 'exclude'}}
-
-#TODO: add the possibilty to prepare scripts for torque and ll
 parser = argparse.ArgumentParser(description="Build directories and config files for Virtual Screening (4th stage)")
 
 parser.add_argument('-l',
@@ -66,6 +50,13 @@ parser.add_argument('-level',
     metavar='INT',
     required=True,
     help='Level of Virtual Screening considered. From 0 (docking with a few compounds) to 3 (VS with a large number of compounds)')
+
+parser.add_argument('-nligands-per-bin',
+    dest='nligands_per_bin',
+    type=int,
+    metavar='INT',
+    default=100,
+    help='Number of ligands to be included in a subfolder (default: 100)')
 
 parser.add_argument('-nligands-per-job',
     dest='nligands_per_job',
@@ -111,127 +102,13 @@ parser.add_argument('-sbcd',
 
 group = parser.add_mutually_exclusive_group(required=False)
 
-for sch in known_schedulers:
+for sch in queuing.known_schedulers:
     group.add_argument('-%s'%sch,
         dest='%s_options'%sch,
         type=str,
         metavar='OPTIONS',
         default=None,
-        help='Options for %s'%known_schedulers[sch])
-
-def get_number_of_compounds(file_l):
-    suffix, ext = os.path.splitext(file_l)
-    if ext == '.mol2':
-        # count number of lines with @<TRIPOS>ATOM
-        nligs = subprocess.check_output('fgrep -c "@<TRIPOS>ATOM" %s'%file_l, shell=True)
-    else:
-        raise IOError("Extension not recognized for ligand file!")
-
-    nligs = int(nligs)
-    return nligs
-
-def slurm_to_seconds(string):
-
-    # check if days are provided
-    string_s = string.split("-")
-    if len(string_s) == 2:
-        days = int(string_s[0])
-        string_s_s = string_s[1].split(":")
-        if len(string_s_s) == 2:
-            hours = int(string_s_s[0])
-            minutes = int(string_s_s[1])
-        elif len(string_s_s) == 1:
-            hours = int(string_s_s[0])
-            minutes = 0
-        else:
-            raise Exception("SLURM time format %s not recognized"%string)
-        seconds = 0
-    elif len(string_s) == 1:
-        string_s_s = string_s[0].split(":")
-        days = 0
-        if len(string_s_s) == 3:
-            hours = int(string_s_s[0])
-            minutes = int(string_s_s[1])
-            seconds = int(string_s_s[2])
-        elif len(string_s_s) == 2:
-            hours = int(string_s_s[0])
-            minutes = int(string_s_s[1])
-            seconds = 0
-        else:
-            raise Exception("SLURM time format %s not recognized"%string)
-
-    time = days*24*3600 + hours*3600 + minutes*60 + seconds
-    return time
-
-def seconds_to_slurm(time):
-
-    days = time/(24*3600)
-    hours = (time - days*24*3600)/3600 
-    minutes = (time - days*24*3600 - hours*3600)/60
-    seconds = time - days*24*3600 - hours*3600 - minutes*60
-
-    if seconds != 0:
-        minutes += 1
-        seconds = 0
-
-    days_str = str(days)
-    hours_str = str(hours)
-    minutes_str = str(minutes)
-
-    if len(hours_str) == 1:
-        hours_str = '0' + hours_str
-    if len(minutes_str) == 1: 
-        minutes_str = '0' + minutes_str
-
-    if days_str == '0':
-       slurm_time = '%s-%s:%s'%(days_str, hours_str, minutes_str)
-    else:
-       slurm_time = '%s:%s:00'%(hours_str, minutes_str)
-    return slurm_time
-
-def check_scheduler_options(string, scheduler):
-
-    options = string.split(',')
-    noptions = len(options)/2
-    if len(options) != 2*noptions:
-        raise IOError('Number of options provided for th scheduler should be even!')
-
-    options_dict = {}
-    for key, value in default_options[scheduler].iteritems():
-        options_dict[key] = value
-
-    for idx in range(noptions):
-        key = str(options[2*idx])
-        value = str(options[2*idx+1])
-        if scheduler in equivalent_options and key in equivalent_options[scheduler]:
-            key = equivalent_options[scheduler][key]
-        options_dict[key] = value
-
-    # check if mandatory options have been set
-    for mo in mandatory_options[scheduler]:
-        if mo not in options_dict.keys():
-            raise ValueError('Option %s mandatory for %s scheduler is not provided'%(mo,scheduler))
-
-    return options_dict
-
-def make_header(options, scheduler, jobname=None):
-
-    header = "#!/bin/bash\n"
-    for key, value in options.iteritems():
-        if scheduler.lower() == 'sge':
-            if jobname is not None and key == 'N':
-                value = jobname
-            header += '#$ -%s %s\n'%(key, value)
-        elif scheduler.lower() == 'slurm':
-            if len(key) == 1:
-                if jobname is not None and key == 'j':
-                    value = jobname
-                header += '#SBATCH -%s=%s\n'%(key, value)
-            else:
-                if jobname is not None and key == 'job-name':
-                    value = jobname
-                header += '#SBATCH --%s=%s\n'%(key, value)
-    return header
+        help='Options for %s'%queuing.known_schedulers[sch])
 
 args = parser.parse_args()
 
@@ -243,12 +120,12 @@ if args.level in [2, 3]:
 
 scheduler = None
 exe = None
-for sch in known_schedulers:
+for sch in queuing.known_schedulers:
     args_dict = vars(args)
     if args_dict[sch+'_options'] is not None:
         scheduler = sch
-        exe = exes[sch]
-        scheduler_options = check_scheduler_options(args_dict[sch+'_options'], scheduler)
+        exe = queuing.exes[sch]
+        scheduler_options = queuing.check_scheduler_options(args_dict[sch+'_options'], scheduler)
 if scheduler is None:
     scheduler_options = None
 
@@ -262,7 +139,6 @@ if args.level in [2, 3]:
         nligands_per_job = args.nligands_per_job
 
 locals().update(args.__dict__)
-
 exts = list(set([os.path.splitext(ff)[1] for ff in args.input_files_r]))
 if len(exts) != 1: # if more than one extension provided
     sys.exit("All files specified with -r option must have the same extension!")
@@ -279,7 +155,6 @@ if exts[0] == '.pdb': # if input files are pdbfiles
     ntargets = len(input_files_r)
     nid_digits = max(3, len(str(ntargets)))
     targetids = []
-
     for jdx, file_r in enumerate(input_files_r):
         targetids.append('target'+(nid_digits-len(str(jdx+1)))*'0' + str(jdx+1))
     csvfile_r = None
@@ -321,7 +196,7 @@ if exts_l[0] == '.mol2': # if input files are .mol2
     ligandids = []
 
     for jdx, file_r in enumerate(input_files_l): 
-        nligands_file_l = get_number_of_compounds(file_l)
+        nligands_file_l = utils.get_number_of_compounds(file_l)
         if nligands_file_l == 1:
             ligandids.append('lig'+(nid_digits-len(str(jdx+1)))*'0' + str(jdx+1))
         else:
@@ -350,6 +225,13 @@ elif exts_l[0] == '.csv': # if input files is a csvfile
 else:
     raise IOError("Extension of files used with -r option not recognized!")
 
+nligands_per_bin = args.nligands_per_bin
+# check if the number of ligands is large enough to consider subfolders
+if nligands > nligands_per_bin:
+    use_subfolders = True
+else:
+    use_subfolders = False
+
 if not os.path.isfile(args.config_file):
     raise ValueError("Config file %s not found!"%args.config_file)
 
@@ -369,7 +251,7 @@ if config.has_option('RESCORING', 'program'):
 else:
     scoring_functions_config = None
 
-extraction_methods = [('SBCD', args.sbcd), ('CD', args.cd), ('SF', args.sf)]
+extraction_methods = [('SBCD',args.sbcd), ('CD',args.cd), ('SF',args.sf)]
 
 # check if scoring functions
 for method, scoring_functions_list in extraction_methods:
@@ -499,24 +381,40 @@ os.mkdir(configdir)
 config_files = []
 for idx, file_r in enumerate(input_files_r):
     recid = targetids[idx]
-
     new_config_file = configdir + '/' + config_suff + '_%s'%(idx+1) + config_ext
 
     update_config_file(new_config_file, args.config_file, recid, args.sitecsv)
     config_files.append(new_config_file)
 
+subdirs = []
 for jdx in range(nligands):
     ligid = ligandids[jdx]
+    subdir = rundir
+    if use_subfolders:
+        minbin = (int(ligid[3:])-1)/nligands_per_bin
+        minbin = minbin*nligands_per_bin + 1
+
+        maxbin = min(minbin + nligands_per_bin - 1, nligands)
+
+        minbin_str = str(minbin)
+        minbin_str = (len(ligid[3:])-len(minbin_str))*'0'+minbin_str
+
+        maxbin_str = str(maxbin)
+        maxbin_str = (len(ligid[3:])-len(maxbin_str))*'0'+maxbin_str
+
+        subdir += '/lig' + minbin_str + '-' + maxbin_str
+    subdirs.append(subdir)
+
     for idx in range(ntargets):
         recid = targetids[idx]
         if use_isomer_folder and use_target_folder:
-            workdir = rundir + '/' + ligid + '/' + recid + '/isomer' + str(isomers[jdx])
+            workdir = subdir + '/' + ligid + '/' + recid + '/isomer' + str(isomers[jdx])
         elif use_isomer_folder:
-            workdir = rundir + '/' + ligid + '/isomer' + str(isomers[jdx])
+            workdir = subdir + '/' + ligid + '/isomer' + str(isomers[jdx])
         elif use_target_folder:
-            workdir = rundir + '/' + ligid + '/' + recid
+            workdir = subdir + '/' + ligid + '/' + recid
         else:
-            workdir = rundir + '/' + ligid
+            workdir = subdir + '/' + ligid
 
         if level is None or level in [0, 1, 2]:
             os.makedirs(workdir)
@@ -539,7 +437,7 @@ for jdx in range(nligands):
             script = ""
             if level == 0:
                 filename = workdir+"/run."+scheduler
-                script += make_header(scheduler_options, scheduler)
+                script += queuing.make_header(scheduler_options, scheduler)
             else:
                 filename = workdir+"/run.sh"
                 script += '#!/bin/bash'
@@ -555,7 +453,10 @@ if level is not None:
     submit_all_filename = scriptdir + '/submit_all.sh'
 
 if level == 0:
-    dirs = rundir + '/lig*'
+    dirs = rundir
+    if use_subfolders:
+       dirs += '/from_*'
+    dirs += '/lig*'
     if use_target_folder:
         dirs += '/target*'
     if use_isomer_folder:
@@ -575,12 +476,12 @@ done\n"""%locals()
 elif level == 1:
     for jdx in range(nligands):
         ligid = str(ligandids[jdx])
-        dirs = rundir + '/' + ligid
+        dirs = subdirs[jdx] + '/' + ligid
         if use_target_folder:
             dirs += '/target*'
         if use_isomer_folder:
             dirs += '/isomer' + str(isomers[jdx])
-        script = make_header(scheduler_options, scheduler, jobname=ligid)
+        script = queuing.make_header(scheduler_options, scheduler, jobname=ligid)
         script += """\nset -e
 curdir=`pwd`
 for dir in %(dirs)s; do
@@ -615,14 +516,14 @@ elif level in [2, 3]:
             else:
                 break
         index = idx + 1
-        script = make_header(scheduler_options, scheduler, jobname="vs%s"%index)
+        script = queuing.make_header(scheduler_options, scheduler, jobname="vs%s"%index, output=scheduler+"-vs-%s.out"%index, error=scheduler+"-vs-%s.err"%index)
 
         if level == 2:
             workdirs = []
             for jdx in range(idx_first, idx_last+1):
-                dir = args.rundir + '/' + ligandids[jdx]
+                dir = subdirs[jdx] + '/' + ligandids[jdx]
                 if use_target_folder:
-                    dirs += '/target*'
+                    dir += '/target*'
                 if use_isomer_folder:
                     dir += '/isomer' + str(isomers[jdx])
                 workdirs.append(dir)

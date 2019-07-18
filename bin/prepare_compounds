@@ -25,6 +25,13 @@ parser.add_argument('-csv',
     default='compounds.csv',
     help='output .csv filename (default: compounds.csv)')
 
+parser.add_argument('-nligands-per-bin',
+    dest='nligands_per_bin',
+    type=int,
+    metavar='INT',
+    default=100,
+    help='Number of ligands to be included in a subfolder (default: 100)')
+
 parser.add_argument('-ligprep',
     dest='ligprep',
     action='store_true',
@@ -40,7 +47,7 @@ parser.add_argument('-flags',
 
 args = parser.parse_args()
 
-def generate_multiple_files_with_babel(file_l, args):
+def generate_multiple_files_with_babel(file_l, args, dirout='', index=None):
 
     suffix, ext = os.path.splitext(file_l)
     if args.ligprep:
@@ -56,16 +63,23 @@ def generate_multiple_files_with_babel(file_l, args):
                 other_flags = '--gen3D'
             else:
                 other_flags = ''
-    
+
     basename = os.path.basename(suffix)
-    output_file = basename + '_' + extout
+    if dirout:
+        basename = dirout + '/' + basename
 
-    # generate multiple files using babel
-    subprocess.check_output('babel %s %s %s %s -m %s'%(input_format_flag, file_l, output_format_flag, output_file, other_flags), shell=True)
-
-    output_files = []
-    for idx in range(len(glob(basename+'_*'+extout))):
-        output_files.append(os.path.abspath(basename+'_%s'%(idx+1)+extout))
+    if index:
+        output_file = basename + '_%s'%index + extout
+        subprocess.check_output('babel %s %s %s %s -f %s -l %s %s 2>/dev/null'\
+%(input_format_flag, file_l, output_format_flag, output_file, index, index, other_flags), shell=True)
+        output_files = os.path.abspath(output_file)
+    else:
+        output_file = basename + '_' + extout
+        # generate multiple files using babel
+        subprocess.check_output('babel %s %s %s %s -m %s 2>/dev/null'%(input_format_flag, file_l, output_format_flag, output_file, other_flags), shell=True)
+        output_files = []
+        for idx in range(len(glob(basename+'_*'+extout))):
+            output_files.append(os.path.abspath(basename+'_%s'%(idx+1)+extout))
 
     return output_files
 
@@ -138,25 +152,33 @@ def get_compounds_number(file_l):
     
 curdir = os.getcwd()
 
-nligs = 0
+nligands = []
 input_files_l = []
 for file_l in args.input_files_l:
     if os.path.exists(file_l):
         input_files_l.append(os.path.abspath(file_l))
-        nligs += get_compounds_number(file_l)
+        nligands.append(get_compounds_number(file_l))
     else:
         raise ValueError("File %s not found!"%(file_l))
 
-print "%i compounds detected..."%nligs
+nligands_tot = sum(nligands)
+print "%i compounds detected..."%nligands_tot
 if args.ligprep:
     print "Preparing compounds with LigPrep..."
 else:
     print "Generating .mol2 files with Babel"
 
 dirname = 'compounds'
-nid_digits = max(3, len(str(nligs)))
+nid_digits = max(3, len(str(nligands_tot)))
 shutil.rmtree(dirname, ignore_errors=True)
 os.mkdir(dirname)
+
+nligands_per_bin = args.nligands_per_bin
+# check if the number of ligands is large enough to consider subfolders
+if nligands_tot > nligands_per_bin:
+    use_subfolders = True
+else:
+    use_subfolders = False
 
 info = {}
 features = ['ligID', 'file_origin', 'mol2file', 'name', 'isomer']
@@ -164,7 +186,7 @@ for ft in features:
     info[ft] = []
 
 shift = 0
-for file_l in input_files_l:
+for ldx, file_l in enumerate(input_files_l):
     # create tmp directory to store temporary files
     tmpdir = '.tmp'
     shutil.rmtree(tmpdir, ignore_errors=True)
@@ -176,24 +198,35 @@ for file_l in input_files_l:
     files_with_single_compound = generate_multiple_files_with_babel(file_l, args)
     os.chdir(curdir)
 
-    for jdx, file_ls in enumerate(files_with_single_compound):
+    for jdx in range(nligands[ldx]):
         # id of ligand
         kdx = jdx + shift + 1
         ligid = 'lig' + (nid_digits-len(str(kdx)))*'0' + str(kdx)
-        dir_l = dirname + '/' + ligid #directory name
 
-        # create ligand directory
-        os.mkdir(dir_l)
-        os.chdir(dir_l)
+        subdir = dirname
+        if use_subfolders:
+            minbin = (int(ligid[3:])-1)/nligands_per_bin
+            minbin = minbin*nligands_per_bin + 1
+            maxbin = min(minbin + nligands_per_bin - 1, nligands_tot)
+
+            minbin_str = str(minbin)
+            minbin_str = (nid_digits-len(minbin_str))*'0'+minbin_str
+
+            maxbin_str = str(maxbin)
+            maxbin_str = (nid_digits-len(maxbin_str))*'0'+maxbin_str
+            subdir += '/lig' + minbin_str + '-' + maxbin_str
+        
+        dir_l = subdir + '/' + ligid
+        os.makedirs(dir_l)
+        file_ls = generate_multiple_files_with_babel(file_l, args, dirout=dir_l, index=jdx+1)
 
         # run Schrodinger's ligprep or copy file
         if args.ligprep:
+            os.chdir(dir_l)
             mol2files = prepare_structure_with_ligprep(file_ls, args.lpflags)
+            os.chdir(curdir)
         else:
-            mol2file = os.path.basename(file_ls)
-            shutil.copyfile(file_ls, mol2file)
-            mol2files = [os.path.abspath(mol2file)]
-        os.chdir(curdir)
+            mol2files = [file_ls]
 
         for idx, mol2file in enumerate(mol2files):
             info['ligID'].append(ligid)
@@ -202,8 +235,7 @@ for file_l in input_files_l:
             info['mol2file'].append(os.path.relpath(mol2file))
             info['isomer'].append(idx+1)
 
-    shutil.rmtree(tmpdir, ignore_errors=True)
-    shift = kdx
+    shift = nligands[ldx]
 
 df = pd.DataFrame(info)
 df[features].to_csv(args.csvfile, index=False)

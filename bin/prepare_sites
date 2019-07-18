@@ -44,7 +44,7 @@ parser.add_argument('-minsize',
     dest='minsize',
     default=30.0,
     metavar='VALUE',
-    help = 'minimum size for the box (default: 30.0 (A)). To be used with sitefinder option.')
+    help = 'minimum size for the box (default: 30.0 (A)).')
 
 parser.add_argument('-nsitesmax',
     dest='nsitesmax',
