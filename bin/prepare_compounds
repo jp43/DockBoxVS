@@ -215,10 +215,10 @@ for ldx, file_l in enumerate(input_files_l):
             maxbin_str = str(maxbin)
             maxbin_str = (nid_digits-len(maxbin_str))*'0'+maxbin_str
             subdir += '/lig' + minbin_str + '-' + maxbin_str
-        
+
         dir_l = subdir + '/' + ligid
         os.makedirs(dir_l)
-        file_ls = generate_multiple_files_with_babel(file_l, args, dirout=dir_l, index=jdx+1)
+        file_ls = files_with_single_compound[jdx]
 
         # run Schrodinger's ligprep or copy file
         if args.ligprep:
@@ -226,7 +226,9 @@ for ldx, file_l in enumerate(input_files_l):
             mol2files = prepare_structure_with_ligprep(file_ls, args.lpflags)
             os.chdir(curdir)
         else:
-            mol2files = [file_ls]
+            mol2file = dir_l + '/' + os.path.basename(file_ls)
+            shutil.move(file_ls, mol2file)
+            mol2files = [os.path.abspath(mol2file)]
 
         for idx, mol2file in enumerate(mol2files):
             info['ligID'].append(ligid)
@@ -235,6 +237,7 @@ for ldx, file_l in enumerate(input_files_l):
             info['mol2file'].append(os.path.relpath(mol2file))
             info['isomer'].append(idx+1)
 
+    shutil.rmtree(tmpdir, ignore_errors=True)
     shift = nligands[ldx]
 
 df = pd.DataFrame(info)

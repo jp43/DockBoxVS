@@ -8,7 +8,6 @@ import ConfigParser
 from glob import glob
 
 import pandas as pd
-
 from dockbox_vs import queuing
 from dockbox_vs import utils
 
@@ -44,12 +43,19 @@ parser.add_argument('-cutoff',
     default=2.0,
     help='RMSD cutoff used for consensus docking or score-based consensus docking. Default: 2.0 A')
 
+parser.add_argument('-extend',
+    dest='extend',
+    action='store_true',
+    default=False,
+    help='Extend docking simulations.')
+
 parser.add_argument('-level',
     dest='level',
     type=int,
     metavar='INT',
-    required=True,
-    help='Level of Virtual Screening considered. From 0 (docking with a few compounds) to 3 (VS with a large number of compounds)')
+    choices=range(2),
+    default=None,
+    help='Level of screening considered. 0: few compounds; 1: large number of compounds.')
 
 parser.add_argument('-nligands-per-bin',
     dest='nligands_per_bin',
@@ -65,6 +71,12 @@ parser.add_argument('-nligands-per-job',
     default=None,
     help='Number of ligands to be run for every submitted job (used for VS levels 2 or 3))')
 
+parser.add_argument('-rescore-only',
+    dest='rescore_only',
+    action='store_true',
+    default=False,
+    help='Rescore only with DockBox!')
+
 parser.add_argument('-s',
     dest='sitecsv',
     type=str,
@@ -79,27 +91,6 @@ parser.add_argument('-w',
     metavar='DIRECTORY NAME',
     help='name of directory created for virtual screening')
 
-parser.add_argument('-sf',
-    dest='sf',
-    nargs='+',
-    action='append',
-    metavar='FUNC',
-    help='Scoring functions used to extract the best pose (combination of scores)')
-
-parser.add_argument('-cd',
-    dest='cd',
-    nargs='+',
-    action='append',
-    metavar='PRGM',
-    help='Docking programs used for standard consensus docking')
-
-parser.add_argument('-sbcd',
-    dest='sbcd',
-    nargs='+',
-    action='append',
-    metavar='FUNC',
-    help='Scoring functions used for score-based consensus docking')
-
 group = parser.add_mutually_exclusive_group(required=False)
 
 for sch in queuing.known_schedulers:
@@ -112,12 +103,6 @@ for sch in queuing.known_schedulers:
 
 args = parser.parse_args()
 
-if args.level in [2, 3]:
-    if args.nligands_per_job is None:
-        raise ValueError('-nligands-per-job option should be specified with VS lvl 2 or 3!')
-    else:
-        nligands_per_job = args.nligands_per_job
-
 scheduler = None
 exe = None
 for sch in queuing.known_schedulers:
@@ -126,15 +111,15 @@ for sch in queuing.known_schedulers:
         scheduler = sch
         exe = queuing.exes[sch]
         scheduler_options = queuing.check_scheduler_options(args_dict[sch+'_options'], scheduler)
+
 if scheduler is None:
     scheduler_options = None
+    if args.level in [0, 1]:
+        sys.exit('Info about the scheduler should be provided when VS level is specified!')
 
-if scheduler is None and args.level in [1, 2, 3]:
-    sys.exit('Info about the scheduler should be provided when VS level is 1 or more!')
-
-if args.level in [2, 3]:
+if args.level == 1:
     if args.nligands_per_job is None:
-        sys.exit('nligands_per_job option should be specified when VS level is 2 or 3!')
+        sys.exit('nligands_per_job option should be specified when VS level is 1!')
     else:
         nligands_per_job = args.nligands_per_job
 
@@ -235,54 +220,6 @@ else:
 if not os.path.isfile(args.config_file):
     raise ValueError("Config file %s not found!"%args.config_file)
 
-config = ConfigParser.SafeConfigParser()
-config.read(args.config_file)
-
-# get names of docking programs from config file
-if config.has_option('DOCKING', 'program'):
-    instances_config = config.get('DOCKING', 'program').lower()
-    instances_config = map(str.strip, instances_config.split(','))
-else:
-    instances_config = None
-# get names of scoring functions from config file
-if config.has_option('RESCORING', 'program'):
-    scoring_functions_config = config.get('RESCORING', 'program').lower()
-    scoring_functions_config = map(str.strip, scoring_functions_config.split(','))
-else:
-    scoring_functions_config = None
-
-extraction_methods = [('SBCD',args.sbcd), ('CD',args.cd), ('SF',args.sf)]
-
-# check if scoring functions
-for method, scoring_functions_list in extraction_methods:
-    if scoring_functions_list:
-        for scoring_functions in scoring_functions_list:
-            for sf in scoring_functions:
-                if method in ['SBCD', 'SF'] and (sf not in scoring_functions_config) and not (sf == 'score' and method == 'SF'):
-                    sys.exit("Scoring function %s needed with %s not specified in the config file!"%(sf, method))
-                elif method == 'CD' and sf not in instances_config:
-                    sys.exit("Docking instance %s needed with %s not specified in the config file!"%(sf, method))
-
-if args.level == 3:
-    if not is_csvfile_r:
-        sys.exit("Protein information should be provided as a .csv file with VS level 3!")
-
-    extract_dirs = '$dir_l'
-    if use_target_folder:
-        create_target_line = '\n    workdir=$dir_l/${targetids[$id_r]}\n    mkdir $workdir'
-        extract_dirs += '/target*'
-    else:
-        create_target_line = '\n    workdir=$dir_l'
-
-    create_isomerdir_line = ''
-    if use_isomer_folder:
-        create_isomerdir_line = '\n    workdir=$workdir/isomer${isomerids[$id_l]}\n    mkdir $workdir'
-        extract_dirs += '/isomer${isomerids[$id_l]}'
-
-    if csvfile_l:
-        csvfile_l_rel = os.path.relpath(csvfile_l, rundir)
-    csvfile_r_rel = os.path.relpath(csvfile_r, rundir)
-
 def update_config_file(new_config_file, config_file, label_r, csvfile):
     """Update binding site parameters in config file"""
 
@@ -365,9 +302,13 @@ boxsize = %(boxsize_conf)s"""% locals()
     shutil.move(tmp_config_file, new_config_file)
 
 rundir = args.rundir
-# always overwrite by default
-shutil.rmtree(rundir, ignore_errors=True)
-os.mkdir(rundir)
+if args.extend:
+    runscript_suff = 'run_extended'
+else:
+    # always overwrite by default
+    shutil.rmtree(rundir, ignore_errors=True)
+    os.mkdir(rundir)
+    runscript_suff = 'run'
 
 config_file_basename = os.path.basename(args.config_file)
 
@@ -416,7 +357,7 @@ for jdx in range(nligands):
         else:
             workdir = subdir + '/' + ligid
 
-        if level is None or level in [0, 1, 2]:
+        if not args.extend:
             os.makedirs(workdir)
 
         # create list of relative paths for targets and receptors
@@ -433,18 +374,20 @@ for jdx in range(nligands):
             for file_c in config_files:
                 config_files_rel.append(os.path.relpath(file_c, workdir))
 
-        if level is None or level in [0, 1, 2]:
-            script = ""
-            if level == 0:
-                filename = workdir+"/run."+scheduler
-                script += queuing.make_header(scheduler_options, scheduler)
-            else:
-                filename = workdir+"/run.sh"
-                script += '#!/bin/bash'
-            script += "\n\nrundbx -f %s -l %s -r %s\n"%(config_files_rel[idx], input_files_l_rel[jdx], input_files_r_rel[idx])
+        script = ""
+        if level == 0:
+            filename = workdir + "/" + runscript_suff + "." + scheduler
+            script += queuing.make_header(scheduler_options, scheduler)
+        else:
+            filename = workdir + "/" + runscript_suff + ".sh"
+            script += '#!/bin/bash'
+        script += "\n\nrundbx -f %s -l %s -r %s"%(config_files_rel[idx], input_files_l_rel[jdx], input_files_r_rel[idx])
+        if args.rescore_only:
+            script += " -rescore_only"
+        script += "\n"
 
-            with open(filename, 'w') as ff:
-                ff.write(script)
+        with open(filename, 'w') as ff:
+            ff.write(script)
 
 if level is not None:
     scriptdir = 'to_submit_' + rundir
@@ -467,40 +410,13 @@ set -e
 curdir=`pwd`
 for dir in %(dirs)s; do
   cd $dir
-  %(exe)s run.%(scheduler)s
+  %(exe)s %(runscript_suff)s.%(scheduler)s
   cd $curdir
 done\n"""%locals()
     with open(submit_all_filename, 'w') as ff:
         ff.write(script_all)
 
 elif level == 1:
-    for jdx in range(nligands):
-        ligid = str(ligandids[jdx])
-        dirs = subdirs[jdx] + '/' + ligid
-        if use_target_folder:
-            dirs += '/target*'
-        if use_isomer_folder:
-            dirs += '/isomer' + str(isomers[jdx])
-        script = queuing.make_header(scheduler_options, scheduler, jobname=ligid)
-        script += """\nset -e
-curdir=`pwd`
-for dir in %(dirs)s; do
-  cd $dir
-  bash run.sh
-  cd $curdir
-done\n"""%locals()
-        with open(scriptdir+'/run_vs_%i.'%(jdx+1)+scheduler, 'w') as ff:
-            ff.write(script)
-
-    with open(submit_all_filename, 'w') as ff:
-        ff.write("""#!/bin/bash
-set -e
-curdir=`pwd`
-for file in %(scriptdir)s/run_vs_*.%(scheduler)s; do
-  %(exe)s $file
-done\n"""%locals())
-
-elif level in [2, 3]:
     # create jobs to be submitted
     nscripts = nligands/nligands_per_job
 
@@ -518,91 +434,23 @@ elif level in [2, 3]:
         index = idx + 1
         script = queuing.make_header(scheduler_options, scheduler, jobname="vs%s"%index, output=scheduler+"-vs-%s.out"%index, error=scheduler+"-vs-%s.err"%index)
 
-        if level == 2:
-            workdirs = []
-            for jdx in range(idx_first, idx_last+1):
-                dir = subdirs[jdx] + '/' + ligandids[jdx]
-                if use_target_folder:
-                    dir += '/target*'
-                if use_isomer_folder:
-                    dir += '/isomer' + str(isomers[jdx])
-                workdirs.append(dir)
+        workdirs = []
+        for jdx in range(idx_first, idx_last+1):
+            dir = subdirs[jdx] + '/' + ligandids[jdx]
+            if use_target_folder:
+                dir += '/target*'
+            if use_isomer_folder:
+                dir += '/isomer' + str(isomers[jdx])
+            workdirs.append(dir)
 
-            workdirs_str = ' '.join(workdirs)
-            script += """\nset -e
+        workdirs_str = ' '.join(workdirs)
+        script += """\nset -e
 dirs=`echo %(workdirs_str)s`
 curdir=`pwd`
 for dir in $dirs; do
   cd $dir
-  bash run.sh
+  bash %(runscript_suff)s.sh
   cd $curdir
-done\n"""%locals()
-        elif level == 3:
-            ligandids_str = " ".join(["'%s'"%id for id in ligandids[idx_first:idx_last+1]])
-            targetids_str = " ".join(["'%s'"%id for id in sorted(list(set(targetids)))])
-            isomerids_str = ' '.join(["'%s'"%isomers[jdx] for jdx in range(idx_first,idx_last+1)])
-
-            files_l_str = " ".join(["'%s'"%ff for ff in input_files_l_rel[idx_first:idx_last+1]])
-            files_r_str = " ".join(["'%s'"%ff for ff in input_files_r_rel])
-            files_c_str = " ".join(["'%s'"%ff for ff in config_files_rel])
-
-            extract_lines = ''
-            for method, scoring_functions_list in extraction_methods:
-                if scoring_functions_list:
-                    for scoring_functions in scoring_functions_list:
-                        method_lower = method.lower()
-                        results_dir = '${dir_l}_%s_%s'%(method_lower,'_'.join(scoring_functions))
-                        extract_lines += '\n\n  extract_dbx_best_poses -dirs %s -%s %s -all-targets -cutoff %s -r %s -csvr %s'\
-%(extract_dirs,method_lower,' '.join(scoring_functions),args.cutoff,results_dir,csvfile_r_rel) 
-                        if csvfile_l:
-                            extract_lines += " -csvl %s"%csvfile_l_rel
-                        # line to move best poses if they exists
-                        extract_lines += '\n  if [ -d %s/$dir_l ]; then mv %s/$dir_l ${dir_l}_tmp/%s_%s; fi'%(results_dir,results_dir,method_lower,'_'.join(scoring_functions))
-                        # line to move best poses if they exists
-                        extract_lines += '\n  tail -n $lines_to_save %s/best_poses.csv >> %s_%s_%s.csv '%(results_dir,method_lower,'_'.join(scoring_functions),index)
-                        extract_lines += '\n  rm -rf %s'%results_dir
-
-            script += """\nset -e
-# get ids
-declare -a ligids=(%(ligandids_str)s)
-declare -a targetids=(%(targetids_str)s)
-declare -a isomerids=(%(isomerids_str)s)
-
-# get relative files locations
-declare -a files_l=(%(files_l_str)s)
-declare -a files_r=(%(files_r_str)s)
-declare -a files_c=(%(files_c_str)s)
-
-nfiles_l=`echo ${#files_l[@]}`
-nfiles_r=`echo ${#files_r[@]}`
-
-cd %(rundir)s
-rm -rf sbcd_*_%(index)s.csv cd_*_%(index)s.csv sf_*_%(index)s.csv
-
-for id_l in `seq 0 $((nfiles_l-1))`; do
-  curdir=`pwd`
-  # find ligand ID
-  dir_l=${ligids[$id_l]}
-
-  # make directory
-  rm -rf $dir_l
-  mkdir $dir_l
-
-  if [ $id_l -eq 0 ]; then lines_to_save=2; else lines_to_save=1; fi
-
-  for id_r in `seq 0 $((nfiles_r-1))`; do%(create_target_line)s%(create_isomerdir_line)s
-    cd $workdir
-    # run dockbox command
-    rundbx -f ${files_c[$id_r]} -l ${files_l[$id_l]} -r ${files_r[$id_r]} 1> /dev/null
-    # collect results
-    cd $curdir
-  done
-
-  # extract results
-  mkdir ${dir_l}_tmp%(extract_lines)s
-
-  rm -rf $dir_l
-  if [ -z "$(ls -A ${dir_l}_tmp)" ]; then rm -rf ${dir_l}_tmp; else mv ${dir_l}_tmp ${dir_l}; fi
 done\n"""%locals()
 
         with open(scriptdir+'/run_vs_%i.'%index+scheduler, 'w') as ff:

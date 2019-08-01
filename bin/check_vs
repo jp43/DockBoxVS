@@ -12,7 +12,7 @@ import pandas as pd
 from dockbox_vs import queuing
 
 #TODO: add the possibilty to prepare scripts for torque and ll
-parser = argparse.ArgumentParser(description="Check Virtual Screening Level 2!")
+parser = argparse.ArgumentParser(description="Check Virtual Screening Level 1!")
 
 parser.add_argument('-f',
     type=str,
@@ -70,24 +70,42 @@ if config.has_option('DOCKING', 'rescoring'):
         is_rescoring = True
 
 workdir = vsdir
+#check if subdirs are there
+is_subdirs = False
+if glob(workdir+'/lig*-*'):
+    is_subdirs = True
+
 hierarchy = ['lig', 'target', 'isomer']
+subdirs = []
 IDs = {}
 for item in hierarchy:
-    dirs = glob(workdir+'/'+item+'*')
+    if is_subdirs and item == 'lig':
+        dirs = glob(workdir+'/lig*-*/'+item+'*')
+    else:
+        dirs = glob(workdir+'/'+item+'*')
     ndirs = len(dirs)
     if ndirs > 0:
-        IDs[item] = []
+        IDs_tmp = []
         for dir in dirs:
-            IDs[item].append(dir.split('/')[-1])
-        IDs[item] == sorted(IDs[item])
-        workdir += '/' + IDs[item][0]
+            IDs_tmp.append('/'.join(dir.split('/')[1:]))
+        IDs_tmp == sorted(IDs_tmp)
+        if is_subdirs and item == 'lig':
+            subdirs = [dir.split('/')[0] for dir in IDs_tmp]
+            IDs[item] = [dir.split('/')[1] for dir in IDs_tmp]
+            workdir += '/' + subdirs[0] + '/' + IDs[item][0]
+        else:
+            IDs[item] = IDs_tmp
+            workdir += '/' + IDs[item][0]
     else:
         IDs[item] = None
 
 is_done = []
 if IDs['lig']:
     for idx, ligID in enumerate(IDs['lig']):
-        workdir = vsdir + '/' + ligID
+        if is_subdirs:
+            workdir = vsdir + '/' + subdirs[idx]  + '/' + ligID
+        else:
+            workdir = vsdir + '/' + ligID
         if IDs['target']:
             workdir += '/' + IDs['target'][-1]
         if IDs['isomer']:
@@ -106,7 +124,10 @@ if IDs['lig']:
     ids_ligands = np.array(IDs['lig'])
     ligands_done = ids_ligands[is_done]
     ligands_undone = ids_ligands[~is_done]
-
+    if is_subdirs:
+        subdirs = np.array(subdirs)
+        subdirs_undone = subdirs[~is_done]
+   
 scheduler = None
 exe = None
 for sch in queuing.known_schedulers:
@@ -145,7 +166,10 @@ if scheduler is not None:
     
         workdirs = []
         for jdx in range(idx_first, idx_last+1):
-            dir = args.vsdir + '/' + ligands_undone[jdx]
+            if is_subdirs:
+                dir = args.vsdir + '/' + subdirs_undone[jdx] + '/' + ligands_undone[jdx]
+            else:
+                dir = args.vsdir + '/' + ligands_undone[jdx]
             if IDs['target'] is not None:
                 dir += '/target*'
             if IDs['target'] is not None:
