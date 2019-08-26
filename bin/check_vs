@@ -127,7 +127,8 @@ if IDs['lig']:
     if is_subdirs:
         subdirs = np.array(subdirs)
         subdirs_undone = subdirs[~is_done]
-   
+    #print "Ligands undone: %s"%(', '.join(ligands_undone))
+
 scheduler = None
 exe = None
 for sch in queuing.known_schedulers:
@@ -144,7 +145,6 @@ if scheduler is not None:
     shutil.rmtree(scriptdir, ignore_errors=True)
     os.mkdir(scriptdir)
     submit_all_filename = scriptdir + '/submit_all.sh'
-
     nligands_per_job = args.nligands_per_job
 
     # create jobs to be submitted

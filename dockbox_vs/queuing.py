@@ -15,7 +15,7 @@ default_options = {'sge': {'S': '/bin/bash',
 'nodes': '1'}}
 
 mandatory_options = {'sge': ['q'], 'slurm': ['partition', 'time']}
-equivalent_options = {'slurm': {'p': 'partition', 't': 'time', 'j': 'jobname', 'x': 'exclude'}}
+equivalent_options = {'slurm': {'p': 'partition', 't': 'time', 'j': 'job-name', 'x': 'exclude'}}
 
 def slurm_to_seconds(string):
 
@@ -77,7 +77,7 @@ def check_scheduler_options(string, scheduler):
 
 def make_header(options, scheduler, jobname=None, output=None, error=None):
 
-    header = "#!/bin/bash\n"
+    header = "#!/bin/bash"
     for key, value in options.iteritems():
         if scheduler.lower() == 'sge':
             if jobname is not None and key == 'N':
@@ -86,14 +86,14 @@ def make_header(options, scheduler, jobname=None, output=None, error=None):
                 value = output
             elif error is not None and key == 'e':
                 value = error
-            header += '#$ -%s %s\n'%(key, value)
+            header += '\n#$ -%s %s'%(key, value)
         elif scheduler.lower() == 'slurm':
             if len(key) == 1:
                 if jobname is not None and key == 'j':
                     value = jobname
-                header += '#SBATCH -%s=%s\n'%(key, value)
+                header += '\n#SBATCH -%s=%s'%(key, value)
             else:
                 if jobname is not None and key == 'job-name':
                     value = jobname
-                header += '#SBATCH --%s=%s\n'%(key, value)
+                header += '\n#SBATCH --%s=%s'%(key, value)
     return header

@@ -156,7 +156,7 @@ for jdx, file_r in enumerate(input_files_r):
                     # get boxsize
                     radius = float(line_s[5])
                     boxsize = max(2*radius,args.minsize)
-                    info['size'].append(', '.join(['%.2f'%boxsize for jdx in range(3)]))
+                    info['size'].append(', '.join(['%.1f'%boxsize for jdx in range(3)]))
                     info['site'].append('%s'%(idx+1))
          os.chdir(pwd)    
     else:
@@ -177,7 +177,7 @@ for jdx, file_r in enumerate(input_files_r):
         center = ', '.join(['%.2f'%float(x) for x in cog])
         info['target'].append(targetid)
         info['center'].append(center)
-        info['size'].append(', '.join(['%.2f'%args.minsize for kdx in range(3)]))
+        info['size'].append(', '.join(['%.1f'%args.minsize for kdx in range(3)]))
         info['site'].append('1')
 
 info = pd.DataFrame(info)
