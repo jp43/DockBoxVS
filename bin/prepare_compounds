@@ -238,7 +238,7 @@ for ldx, file_l in enumerate(input_files_l):
             info['isomer'].append(idx+1)
 
     shutil.rmtree(tmpdir, ignore_errors=True)
-    shift = nligands[ldx]
+    shift = kdx
 
 df = pd.DataFrame(info)
 df[features].to_csv(args.csvfile, index=False)
