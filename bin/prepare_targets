@@ -44,6 +44,11 @@ parser.add_argument('-flags',
     metavar='STRING',
     help='prepwizard flags for protein preparation. Default: "-fix -pH \'neutral\'"')
 
+parser.add_argument('-update',
+    action='store_true',
+    default=False,
+    help='Update from previous simulations')
+
 args = parser.parse_args()
 
 def prepare_structure_with_prepwizard(file_r, flags):
@@ -105,10 +110,27 @@ for file_r in args.input_files_r:
 
 ntargets = len(input_files_r)
 
-dirname = 'targets'
+dirname, ext = os.path.splitext(args.csvfile)
+if args.update and not os.path.isfile(args.csvfile):
+    raise IOError("update was asked but .csv file %s with targets not found"%args.csvfile)
+
+if args.update and not os.path.isdir(dirname):
+    raise IOError("update was asked but directory %s with targets not found"%dirname)
+
 nid_digits = max(3, len(str(ntargets)))
-shutil.rmtree(dirname, ignore_errors=True)
-os.mkdir(dirname)
+if args.update:
+    # load old database
+    df_old = pd.read_csv(args.csvfile)
+    targetid_last = df_old.iloc[-1]['targetID']
+
+    # get number of targets in old database
+    ntargets_old = int(targetid_last[6:])
+    shift = ntargets_old
+else:
+    # overwrite and make a new directory by default
+    shutil.rmtree(dirname, ignore_errors=True)
+    os.mkdir(dirname)
+    shift = 0
 
 info = {}
 features = ['targetID', 'file_origin', 'pdbfile']
@@ -116,7 +138,8 @@ for ft in features:
     info[ft] = []
 
 for idx, file_r in enumerate(input_files_r):
-    targetid = 'target' + (nid_digits-len(str(idx+1)))*'0' + str(idx+1)
+    jdx = shift + idx + 1
+    targetid = 'target' + (nid_digits-len(str(jdx)))*'0' + str(jdx)
     dir_r = dirname + '/' + targetid
 
     # create target directory
@@ -138,5 +161,7 @@ for idx, file_r in enumerate(input_files_r):
     info['file_origin'].append(os.path.relpath(file_r))
     info['pdbfile'].append(os.path.relpath(pdbfile))
 
-info = pd.DataFrame(info)
-info[features].to_csv(args.csvfile, index=False)
+df = pd.DataFrame(info)
+if args.update:
+    df = pd.concat([df_old, df]).reset_index()
+df[features].to_csv(args.csvfile, index=False)

@@ -36,13 +36,6 @@ parser.add_argument('-f',
     default='config.ini',
     help='config file: .ini')
 
-parser.add_argument('-cutoff',
-    dest='cutoff',
-    type=float,
-    metavar='RMSD_VALUE',
-    default=2.0,
-    help='RMSD cutoff used for consensus docking or score-based consensus docking. Default: 2.0 A')
-
 parser.add_argument('-extend',
     dest='extend',
     action='store_true',
@@ -69,7 +62,7 @@ parser.add_argument('-nligands-per-job',
     type=int,
     metavar='INT',
     default=None,
-    help='Number of ligands to be run for every submitted job (used for VS levels 2 or 3))')
+    help='Number of ligands to be run for every submitted job (used for VS level 1))')
 
 parser.add_argument('-rescore-only',
     dest='rescore_only',
@@ -83,6 +76,11 @@ parser.add_argument('-s',
     metavar='FILE',
     default='sites.csv',
     help='csvfile with binding sites: .csv (default: sites.csv)')
+
+parser.add_argument('-update',
+    action='store_true',
+    default=False,
+    help='Update previous VS folders')
 
 parser.add_argument('-w',
     dest='rundir',
@@ -158,10 +156,11 @@ elif exts[0] == '.csv': # if input files is the csvfile
 else:
     raise IOError("Extension of files used with -r option not recognized!")
 
-if ntargets == 1:
-    use_target_folder = False
-else:
-    use_target_folder = True
+#if ntargets == 1:
+#    use_target_folder = False
+#else:
+#    use_target_folder = True
+use_target_folder = True
 
 exts_l = list(set([os.path.splitext(ff)[1] for ff in args.input_files_l]))
 if len(exts_l) != 1: # if more than one extension provided
@@ -304,6 +303,8 @@ boxsize = %(boxsize_conf)s"""% locals()
 rundir = args.rundir
 if args.extend:
     runscript_suff = 'run_extended'
+elif args.update:
+    runscript_suff = 'run'
 else:
     # always overwrite by default
     shutil.rmtree(rundir, ignore_errors=True)
@@ -357,7 +358,12 @@ for jdx in range(nligands):
         else:
             workdir = subdir + '/' + ligid
 
-        if not args.extend:
+        if args.update:
+            if os.path.isdir(workdir):
+                break
+            else:
+                os.makedirs(workdir)
+        elif not args.extend:
             os.makedirs(workdir)
 
         # create list of relative paths for targets and receptors
@@ -398,7 +404,7 @@ if level is not None:
 if level == 0:
     dirs = rundir
     if use_subfolders:
-       dirs += '/from_*'
+       dirs += '/lig*'
     dirs += '/lig*'
     if use_target_folder:
         dirs += '/target*'
