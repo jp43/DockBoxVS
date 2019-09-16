@@ -4,7 +4,9 @@ import sys
 import shutil
 import stat
 import subprocess
+
 from glob import glob
+
 import argparse
 import ConfigParser
 import pandas as pd
@@ -25,12 +27,10 @@ parser.add_argument('-csv',
     default='compounds.csv',
     help='output .csv filename (default: compounds.csv)')
 
-parser.add_argument('-nligands-per-bin',
-    dest='nligands_per_bin',
-    type=int,
-    metavar='INT',
-    default=100,
-    help='Number of ligands to be included in a subfolder (default: 100)')
+parser.add_argument('-extend',
+    action='store_true',
+    default=False,
+    help='Extend from previous simulations')
 
 parser.add_argument('-ligprep',
     dest='ligprep',
@@ -44,6 +44,13 @@ parser.add_argument('-flags',
     dest='lpflags',
     metavar='STRING',
     help='ligprep flags for ligand preparation. Default: "-ph 7.0 -pht 2.0 -i 2 -s 8 -t 4"')
+
+parser.add_argument('-nligands-per-bin',
+    dest='nligands_per_bin',
+    type=int,
+    metavar='INT',
+    default=100,
+    help='Number of ligands to be included in a subfolder (default: 100)')
 
 args = parser.parse_args()
 
@@ -149,43 +156,67 @@ def get_compounds_number(file_l):
 
     nligs = int(nligs)
     return nligs
-    
+
 curdir = os.getcwd()
 
-nligands = []
+nligands_per_file = []
 input_files_l = []
 for file_l in args.input_files_l:
     if os.path.exists(file_l):
         input_files_l.append(os.path.abspath(file_l))
-        nligands.append(get_compounds_number(file_l))
+        nligands_per_file.append(get_compounds_number(file_l))
     else:
         raise ValueError("File %s not found!"%(file_l))
 
-nligands_tot = sum(nligands)
-print "%i compounds detected..."%nligands_tot
+dirname, ext = os.path.splitext(args.csvfile)
+if args.extend and not os.path.isfile(args.csvfile):
+    raise IOError(".csv file %s with compounds not found"%args.csvfile)
+
+if args.extend and not os.path.isdir(dirname):
+    raise IOError("directory %s with compounds not found"%dirname)
+
+nfiles = len(nligands_per_file)
+nligands = sum(nligands_per_file)
+
+print "%i compounds detected..."%nligands
 if args.ligprep:
     print "Preparing compounds with LigPrep..."
 else:
     print "Generating .mol2 files with Babel"
 
-dirname = 'compounds'
-nid_digits = max(3, len(str(nligands_tot)))
-shutil.rmtree(dirname, ignore_errors=True)
-os.mkdir(dirname)
-
-nligands_per_bin = args.nligands_per_bin
-# check if the number of ligands is large enough to consider subfolders
-if nligands_tot > nligands_per_bin:
-    use_subfolders = True
+if args.extend:
+    # check if subfolders are used
+    if glob('%s/*/*/*'%dirname):
+        use_subfolders = True
+        subfolders = sorted(glob('%s/*'%dirname)) # to be tested
+        nligands_per_bin = len(glob(subfolders[0]+'/*'))
+    else:
+        use_subfolders = False 
+    df_old = pd.read_csv(args.csvfile)
+    ligid_last = df_old.iloc[-1]['ligID']
+    nligands_old = int(ligid_last[3:])
+    nid_digits_old = len(ligid_last[3:])
+    nid_digits = max(3, len(str(nligands_old+nligands)))
+    if nid_digits > nid_digits_old:
+        raise ValueError("Number of compounds provided for extension too large!")
+    shift = nligands_old
 else:
-    use_subfolders = False
+    shutil.rmtree(dirname, ignore_errors=True)
+    os.makedirs(dirname)
+    # check if the number of ligands is large enough to consider subfolders
+    if nligands > nligands_per_bin:
+        use_subfolders = True
+        nligands_per_bin = args.nligands_per_bin
+    else:
+        use_subfolders = False
+    nid_digits = max(3, len(str(nligands)))
+    shift = 0
 
 info = {}
 features = ['ligID', 'file_origin', 'mol2file', 'name', 'isomer']
 for ft in features:
     info[ft] = []
 
-shift = 0
 for ldx, file_l in enumerate(input_files_l):
     # create tmp directory to store temporary files
     tmpdir = '.tmp'
@@ -198,7 +229,7 @@ for ldx, file_l in enumerate(input_files_l):
     files_with_single_compound = generate_multiple_files_with_babel(file_l, args)
     os.chdir(curdir)
 
-    for jdx in range(nligands[ldx]):
+    for jdx in range(nligands_per_file[ldx]):
         # id of ligand
         kdx = jdx + shift + 1
         ligid = 'lig' + (nid_digits-len(str(kdx)))*'0' + str(kdx)
@@ -207,7 +238,7 @@ for ldx, file_l in enumerate(input_files_l):
         if use_subfolders:
             minbin = (int(ligid[3:])-1)/nligands_per_bin
             minbin = minbin*nligands_per_bin + 1
-            maxbin = min(minbin + nligands_per_bin - 1, nligands_tot)
+            maxbin = min(minbin + nligands_per_bin - 1, nligands)
 
             minbin_str = str(minbin)
             minbin_str = (nid_digits-len(minbin_str))*'0'+minbin_str
@@ -241,4 +272,6 @@ for ldx, file_l in enumerate(input_files_l):
     shift = kdx
 
 df = pd.DataFrame(info)
+if args.extend:
+    df = pd.concat([df_old, df]).reset_index()
 df[features].to_csv(args.csvfile, index=False)
