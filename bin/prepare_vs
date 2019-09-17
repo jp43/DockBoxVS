@@ -115,14 +115,16 @@ if scheduler is None:
     if args.level in [0, 1]:
         sys.exit('Info about the scheduler should be provided when VS level is specified!')
 
+if args.level == 1 and args.update:
+    print "Update option not configured to work with VS level 1. Setting it to 0..."
+    args.level == 0
+
 if args.level == 1:
     if args.nligands_per_job is None:
         sys.exit('nligands_per_job option should be specified when VS level is 1!')
-    else:
-        nligands_per_job = args.nligands_per_job
 
 locals().update(args.__dict__)
-exts = list(set([os.path.splitext(ff)[1] for ff in args.input_files_r]))
+exts = list(set([os.path.splitext(ff)[1] for ff in input_files_r]))
 if len(exts) != 1: # if more than one extension provided
     sys.exit("All files specified with -r option must have the same extension!")
 
@@ -156,10 +158,6 @@ elif exts[0] == '.csv': # if input files is the csvfile
 else:
     raise IOError("Extension of files used with -r option not recognized!")
 
-#if ntargets == 1:
-#    use_target_folder = False
-#else:
-#    use_target_folder = True
 use_target_folder = True
 
 exts_l = list(set([os.path.splitext(ff)[1] for ff in args.input_files_l]))
@@ -209,17 +207,46 @@ elif exts_l[0] == '.csv': # if input files is a csvfile
 else:
     raise IOError("Extension of files used with -r option not recognized!")
 
-nligands_per_bin = args.nligands_per_bin
-# check if the number of ligands is large enough to consider subfolders
-if nligands > nligands_per_bin:
-    use_subfolders = True
+if extend or update:
+    if extend:
+        runscript_suff = 'run_extended'
+    else:
+        runscript_suff = 'run'
+    workdirs_update = []
+    if not os.path.isdir(rundir):
+        raise IOError("update was asked but no VS folder was found!")
+
+    # determine if subfolders were used last time
+    if glob(rundir+'/lig*/lig*'):
+        use_subfolders = True
+        # list all subfolders
+        subfolders = sorted(glob(rundir+'/lig*'))
+        # deduce the number of ligands per bins used
+        nligands_per_bin = len(glob(subfolders[0]+'/lig*'))
+
+        if update:
+            # get information about the last subfolder (as it will change because we are adding compounds)
+            subfolder_last_old = subfolders[-1]
+            minbin_str_last_old = subfolder_last_old.split('/')[-1].split('-')[0][3:] # the first ligID in that subfolder won't change though
+    else:
+        use_subfolders = False # no subfolders were used before
 else:
-    use_subfolders = False
+    runscript_suff = 'run'
+    # always overwrite by default
+    shutil.rmtree(rundir, ignore_errors=True)
+    os.mkdir(rundir)
 
-if not os.path.isfile(args.config_file):
-    raise ValueError("Config file %s not found!"%args.config_file)
+    # check if the number of ligands is large enough to consider subfolders
+    if nligands > nligands_per_bin:
+        nligands_per_bin = nligands_pe_bin
+        use_subfolders = True
+    else:
+        use_subfolders = False
 
-def update_config_file(new_config_file, config_file, label_r, csvfile):
+if not os.path.isfile(config_file):
+    raise ValueError("Config file %s not found!"%config_file)
+
+def update_config_file(new_config_file, old_config_file, label_r, csvfile):
     """Update binding site parameters in config file"""
 
     # create tmp config file name from original config file
@@ -229,11 +256,11 @@ def update_config_file(new_config_file, config_file, label_r, csvfile):
 
     # remove section 'SITE' and option site in DOCKING section of config file if exists
     with open(tmp_config_file, 'w') as tmpf:
-        with open(config_file, 'r') as newf:
+        with open(old_config_file, 'r') as oldf:
             isdock = False
             sitesection = False
             docksection = False
-            for line in newf:
+            for line in oldf:
                 # check if still in section SITE*
                 if line.startswith('[SITE'):
                     sitesection = True
@@ -300,18 +327,7 @@ boxsize = %(boxsize_conf)s"""% locals()
                     tmpf.write(newsite_section+'\n')
     shutil.move(tmp_config_file, new_config_file)
 
-rundir = args.rundir
-if args.extend:
-    runscript_suff = 'run_extended'
-elif args.update:
-    runscript_suff = 'run'
-else:
-    # always overwrite by default
-    shutil.rmtree(rundir, ignore_errors=True)
-    os.mkdir(rundir)
-    runscript_suff = 'run'
-
-config_file_basename = os.path.basename(args.config_file)
+config_file_basename = os.path.basename(config_file)
 
 # copy config files
 config_suff, config_ext = os.path.splitext(config_file_basename)
@@ -325,7 +341,7 @@ for idx, file_r in enumerate(input_files_r):
     recid = targetids[idx]
     new_config_file = configdir + '/' + config_suff + '_%s'%(idx+1) + config_ext
 
-    update_config_file(new_config_file, args.config_file, recid, args.sitecsv)
+    update_config_file(new_config_file, config_file, recid, sitecsv)
     config_files.append(new_config_file)
 
 subdirs = []
@@ -345,8 +361,11 @@ for jdx in range(nligands):
         maxbin_str = (len(ligid[3:])-len(maxbin_str))*'0'+maxbin_str
 
         subdir += '/lig' + minbin_str + '-' + maxbin_str
-    subdirs.append(subdir)
+        if update:
+            if minbin_str == minbin_str_last_old and os.path.isdir(subfolder_last_old):
+                os.rename(subfolder_last_old, subdir)
 
+    subdirs.append(subdir)
     for idx in range(ntargets):
         recid = targetids[idx]
         if use_isomer_folder and use_target_folder:
@@ -357,14 +376,6 @@ for jdx in range(nligands):
             workdir = subdir + '/' + ligid + '/' + recid
         else:
             workdir = subdir + '/' + ligid
-
-        if args.update:
-            if os.path.isdir(workdir):
-                break
-            else:
-                os.makedirs(workdir)
-        elif not args.extend:
-            os.makedirs(workdir)
 
         # create list of relative paths for targets and receptors
         if jdx == 0 and idx == 0:
@@ -380,6 +391,15 @@ for jdx in range(nligands):
             for file_c in config_files:
                 config_files_rel.append(os.path.relpath(file_c, workdir))
 
+        if update:
+            if os.path.isdir(workdir):
+                continue
+            else:
+                workdirs_update.append(workdir)
+                os.makedirs(workdir)
+        elif not extend:
+            os.makedirs(workdir)
+
         script = ""
         if level == 0:
             filename = workdir + "/" + runscript_suff + "." + scheduler
@@ -388,7 +408,7 @@ for jdx in range(nligands):
             filename = workdir + "/" + runscript_suff + ".sh"
             script += '#!/bin/bash'
         script += "\n\nrundbx -f %s -l %s -r %s"%(config_files_rel[idx], input_files_l_rel[jdx], input_files_r_rel[idx])
-        if args.rescore_only:
+        if rescore_only:
             script += " -rescore_only"
         script += "\n"
 
@@ -402,26 +422,30 @@ if level is not None:
     submit_all_filename = scriptdir + '/submit_all.sh'
 
 if level == 0:
-    dirs = rundir
-    if use_subfolders:
-       dirs += '/lig*'
-    dirs += '/lig*'
-    if use_target_folder:
-        dirs += '/target*'
-    if use_isomer_folder:
-        dirs += '/isomer*'
+    if update:
+        dirs = ' '.join(workdirs_update)
+        line_iterate = "dirs=`echo %s`\nfor dir in $dirs; do"%dirs
+    else:
+        dirs = rundir
+        if use_subfolders:
+            dirs += '/lig*'
+        dirs += '/lig*'
+        if use_target_folder:
+            dirs += '/target*'
+        if use_isomer_folder:
+            dirs += '/isomer*'
+        line_iterate = "for dir in %s; do"%dirs
     # write script to submit all jobs
     script_all = """#!/bin/bash
 set -e
 curdir=`pwd`
-for dir in %(dirs)s; do
+%(line_iterate)s
   cd $dir
   %(exe)s %(runscript_suff)s.%(scheduler)s
   cd $curdir
 done\n"""%locals()
     with open(submit_all_filename, 'w') as ff:
         ff.write(script_all)
-
 elif level == 1:
     # create jobs to be submitted
     nscripts = nligands/nligands_per_job

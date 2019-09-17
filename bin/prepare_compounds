@@ -158,7 +158,6 @@ def get_compounds_number(file_l):
     return nligs
 
 curdir = os.getcwd()
-
 nligands_per_file = []
 input_files_l = []
 for file_l in args.input_files_l:
@@ -186,7 +185,7 @@ else:
 
 if args.update:
     # check if subfolders were used before
-    if glob('%s/*/*/*'%dirname):
+    if glob('%s/lig*/lig*/*'%dirname):
         use_subfolders = True
         # list all subfolders
         subfolders = sorted(glob('%s/*'%dirname))
@@ -268,8 +267,8 @@ for ldx, file_l in enumerate(input_files_l):
 
             subdir += '/lig' + minbin_str + '-' + maxbin_str
             if args.update:
-                 if minbin_str == minbin_str_last_old and os.path.isdir(subfolder_last_old):
-                     os.rename(subfolder_last_old, subdir)
+                if minbin_str == minbin_str_last_old and os.path.isdir(subfolder_last_old):
+                    os.rename(subfolder_last_old, subdir)
 
         dir_l = subdir + '/' + ligid
         os.makedirs(dir_l)
