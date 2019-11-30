@@ -26,7 +26,7 @@ parser.add_argument('-nligands-per-job',
     type=int,
     metavar='INT',
     default=1,
-    help='Number of ligands to be run for every submitted job (used for VS levels 2 or 3))')
+    help='Number of ligands to be run for every submitted job (used for VS levels 1))')
 
 parser.add_argument('-w',
     dest='vsdir',
@@ -60,11 +60,10 @@ config.read(args.config_file)
 
 is_rescoring = False
 scoring_functions = None
-
 # get names of docking programs from config file
 if config.has_option('DOCKING', 'rescoring'):
-    is_rescoring = config.get('DOCKING', 'rescoring').lower()
-    if is_rescoring in ['yes', 'true']:
+    is_rescoring_config = config.get('DOCKING', 'rescoring').lower()
+    if is_rescoring_config in ['yes', 'true']:
         scoring_functions = config.get('RESCORING', 'program').lower()
         scoring_functions = map(str.strip, scoring_functions.split(','))
         is_rescoring = True
@@ -80,9 +79,9 @@ subdirs = []
 IDs = {}
 for item in hierarchy:
     if is_subdirs and item == 'lig':
-        dirs = glob(workdir+'/lig*-*/'+item+'*')
+        dirs = sorted(glob(workdir+'/lig*-*/'+item+'*'))
     else:
-        dirs = glob(workdir+'/'+item+'*')
+        dirs = sorted(glob(workdir+'/'+item+'*'))
     ndirs = len(dirs)
     if ndirs > 0:
         IDs_tmp = []
@@ -94,7 +93,7 @@ for item in hierarchy:
             IDs[item] = [dir.split('/')[1] for dir in IDs_tmp]
             workdir += '/' + subdirs[0] + '/' + IDs[item][0]
         else:
-            IDs[item] = IDs_tmp
+            IDs[item] = [dir.split('/')[-1] for dir in IDs_tmp]
             workdir += '/' + IDs[item][0]
     else:
         IDs[item] = None
@@ -172,7 +171,7 @@ if scheduler is not None:
                 dir = args.vsdir + '/' + ligands_undone[jdx]
             if IDs['target'] is not None:
                 dir += '/target*'
-            if IDs['target'] is not None:
+            if IDs['isomer'] is not None:
                 dir += '/isomer*'
             workdirs.append(dir)
     

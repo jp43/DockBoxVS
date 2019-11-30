@@ -115,7 +115,7 @@ if scheduler is None:
     if args.level in [0, 1]:
         sys.exit('Info about the scheduler should be provided when VS level is specified!')
 
-if args.level == 1 and args.update:
+if args.level != 0 and args.update:
     print "Update option not configured to work with VS level 1. Setting it to 0..."
     args.level == 0
 
@@ -238,7 +238,7 @@ else:
 
     # check if the number of ligands is large enough to consider subfolders
     if nligands > nligands_per_bin:
-        nligands_per_bin = nligands_pe_bin
+        nligands_per_bin = nligands_per_bin
         use_subfolders = True
     else:
         use_subfolders = False

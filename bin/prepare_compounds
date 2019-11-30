@@ -221,6 +221,7 @@ else:
     shutil.rmtree(dirname, ignore_errors=True)
     os.makedirs(dirname)
 
+    nligands_per_bin = args.nligands_per_bin
     # check if the number of ligands is large enough to consider subfolders
     if nligands > nligands_per_bin:
         use_subfolders = True
