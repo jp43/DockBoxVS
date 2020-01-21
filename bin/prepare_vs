@@ -11,6 +11,8 @@ import pandas as pd
 from dockbox_vs import queuing
 from dockbox_vs import utils
 
+known_formats = ['.sdf', '.smi', '.mol2']
+
 parser = argparse.ArgumentParser(description="Build directories and config files for Virtual Screening (4th stage)")
 
 parser.add_argument('-l',
@@ -50,12 +52,19 @@ parser.add_argument('-level',
     default=None,
     help='Level of screening considered. 0: few compounds; 1: large number of compounds.')
 
-parser.add_argument('-nligands-per-bin',
+parser.add_argument('-ligands-per-bin',
     dest='nligands_per_bin',
     type=int,
     metavar='INT',
     default=100,
     help='Number of ligands to be included in a subfolder (default: 100)')
+
+parser.add_argument('-ligands-per-bin2',
+    dest='nligands_per_subbin',
+    type=int,
+    metavar='INT',
+    default=0,
+    help='Number of ligands to be included in a subsubfolder (default: 0)')
 
 parser.add_argument('-nligands-per-job',
     dest='nligands_per_job',
@@ -159,7 +168,6 @@ else:
     raise IOError("Extension of files used with -r option not recognized!")
 
 use_target_folder = True
-
 exts_l = list(set([os.path.splitext(ff)[1] for ff in args.input_files_l]))
 if len(exts_l) != 1: # if more than one extension provided
     raise ValueError("All files specified with -l option must have the same extension!")
@@ -194,7 +202,9 @@ elif exts_l[0] == '.csv': # if input files is a csvfile
     csvfile_l = os.path.abspath(args.input_files_l[0])
     df_ligands = pd.read_csv(csvfile_l)
 
-    input_files_l = [os.path.abspath(ff) for ff in list(df_ligands['mol2file'])]
+    input_files_l = [os.path.abspath(ff) for ff in list(df_ligands['file_origin'])]
+    input_files_l_indices = list(df_ligands['index'])
+
     nligands = len(input_files_l)
     ligandids = list(df_ligands['ligID'])
     isomers = list(df_ligands['isomer'])
@@ -240,6 +250,10 @@ else:
     if nligands > nligands_per_bin:
         nligands_per_bin = nligands_per_bin
         use_subfolders = True
+        if nligands_per_subbin > 0 and nligands_per_bin > nligands_per_subbin:
+            use_subsubfolders = True
+        else:
+            use_subsubfolders = False
     else:
         use_subfolders = False
 
@@ -327,6 +341,21 @@ boxsize = %(boxsize_conf)s"""% locals()
                     tmpf.write(newsite_section+'\n')
     shutil.move(tmp_config_file, new_config_file)
 
+def get_babel_command(file_l, index=None):
+
+    suffix, ext = os.path.splitext(file_l)
+    extout = '.mol2'
+    for fmt in known_formats:
+        if ext == fmt:
+            input_format_flag = '-i' + ext[1:]
+            output_format_flag = '-o' + extout[1:]
+            if fmt in ['.smi', '.sdf']:
+                other_flags = '--gen3D'
+            else:
+                other_flags = ''
+
+    return 'babel %s %s %s ligand.mol2 -f %s -l %s %s 2>/dev/null'%(input_format_flag, file_l, output_format_flag, index, index, other_flags)
+
 config_file_basename = os.path.basename(config_file)
 
 # copy config files
@@ -361,6 +390,23 @@ for jdx in range(nligands):
         maxbin_str = (len(ligid[3:])-len(maxbin_str))*'0'+maxbin_str
 
         subdir += '/lig' + minbin_str + '-' + maxbin_str
+        if update:
+            if minbin_str == minbin_str_last_old and os.path.isdir(subfolder_last_old):
+                os.rename(subfolder_last_old, subdir)
+
+        if use_subsubfolders:
+            # determine the name of the corresponding subsubfolder
+            minbin = (int(ligid[3:])-1)/nligands_per_subbin
+            minbin = minbin*nligands_per_subbin + 1
+            maxbin = min(minbin + nligands_per_subbin - 1, nligands)
+
+            minbin_str = str(minbin)
+            minbin_str = (len(ligid[3:])-len(minbin_str))*'0'+minbin_str
+
+            maxbin_str = str(maxbin)
+            maxbin_str = (len(ligid[3:])-len(maxbin_str))*'0'+maxbin_str
+            subdir += '/lig' + minbin_str + '-' + maxbin_str
+
         if update:
             if minbin_str == minbin_str_last_old and os.path.isdir(subfolder_last_old):
                 os.rename(subfolder_last_old, subdir)
@@ -407,10 +453,11 @@ for jdx in range(nligands):
         else:
             filename = workdir + "/" + runscript_suff + ".sh"
             script += '#!/bin/bash'
-        script += "\n\nrundbx -f %s -l %s -r %s"%(config_files_rel[idx], input_files_l_rel[jdx], input_files_r_rel[idx])
+        script += "\n\n" + get_babel_command(input_files_l_rel[jdx], index=jdx+1)
+        script += "\nrundbx -f %s -l ligand.mol2 -r %s"%(config_files_rel[idx], input_files_r_rel[idx])
         if rescore_only:
             script += " -rescore_only"
-        script += "\n"
+        script += "\nrm -rf ligand.mol2"
 
         with open(filename, 'w') as ff:
             ff.write(script)
@@ -429,6 +476,8 @@ if level == 0:
         dirs = rundir
         if use_subfolders:
             dirs += '/lig*'
+            if use_subsubfolders:
+                dirs += '/lig*'
         dirs += '/lig*'
         if use_target_folder:
             dirs += '/target*'
