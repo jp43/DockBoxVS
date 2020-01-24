@@ -453,7 +453,7 @@ for jdx in range(nligands):
         else:
             filename = workdir + "/" + runscript_suff + ".sh"
             script += '#!/bin/bash'
-        script += "\n\n" + get_babel_command(input_files_l_rel[jdx], index=jdx+1)
+        script += "\n\n" + get_babel_command(input_files_l_rel[jdx], index=input_files_l_indices[jdx])
         script += "\nrundbx -f %s -l ligand.mol2 -r %s"%(config_files_rel[idx], input_files_r_rel[idx])
         if rescore_only:
             script += " -rescore_only"

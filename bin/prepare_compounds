@@ -59,9 +59,6 @@ for file_l in args.input_files_l:
     else:
         raise ValueError("File %s not found!"%(file_l))
 
-if args.update and not os.path.isfile(args.csvfile):
-    raise IOError("Extension was asked but .csv file %s with compounds not found"%args.csvfile)
-
 nfiles = len(nligands_per_file)
 nligands = sum(nligands_per_file)
 print "%i compounds detected..."%nligands
