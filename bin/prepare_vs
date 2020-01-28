@@ -3,25 +3,22 @@ import os
 import sys
 import shutil
 import argparse
+import subprocess
 
 import ConfigParser
-from glob import glob
-
 import pandas as pd
+
 from dockbox_vs import queuing
 from dockbox_vs import utils
-
-known_formats = ['.sdf', '.smi', '.mol2']
 
 parser = argparse.ArgumentParser(description="Build directories and config files for Virtual Screening (4th stage)")
 
 parser.add_argument('-l',
     type=str,
-    dest='input_files_l',
-    nargs='+',
+    dest='input_file_l',
     metavar='FILE',
-    default=['compounds.csv'],
-    help='ligand file(s): .mol2, .csv (default: compounds.csv)')
+    default='compounds.csv',
+    help='ligand file: .csv (default: compounds.csv)')
 
 parser.add_argument('-r',
     type=str,
@@ -38,12 +35,6 @@ parser.add_argument('-f',
     default='config.ini',
     help='config file: .ini')
 
-parser.add_argument('-extend',
-    dest='extend',
-    action='store_true',
-    default=False,
-    help='Extend docking simulations.')
-
 parser.add_argument('-level',
     dest='level',
     type=int,
@@ -52,19 +43,12 @@ parser.add_argument('-level',
     default=None,
     help='Level of screening considered. 0: few compounds; 1: large number of compounds.')
 
-parser.add_argument('-ligands-per-bin',
-    dest='nligands_per_bin',
+parser.add_argument('-nfolders',
+    dest='nfolders_per_layer',
     type=int,
     metavar='INT',
     default=100,
-    help='Number of ligands to be included in a subfolder (default: 100)')
-
-parser.add_argument('-ligands-per-bin2',
-    dest='nligands_per_subbin',
-    type=int,
-    metavar='INT',
-    default=0,
-    help='Number of ligands to be included in a subsubfolder (default: 0)')
+    help='Number of folders in a layer (default: 100)')
 
 parser.add_argument('-nligands-per-job',
     dest='nligands_per_job',
@@ -86,11 +70,6 @@ parser.add_argument('-s',
     default='sites.csv',
     help='csvfile with binding sites: .csv (default: sites.csv)')
 
-parser.add_argument('-update',
-    action='store_true',
-    default=False,
-    help='Update previous VS folders')
-
 parser.add_argument('-w',
     dest='rundir',
     type=str,
@@ -99,7 +78,6 @@ parser.add_argument('-w',
     help='name of directory created for virtual screening')
 
 group = parser.add_mutually_exclusive_group(required=False)
-
 for sch in queuing.known_schedulers:
     group.add_argument('-%s'%sch,
         dest='%s_options'%sch,
@@ -122,15 +100,11 @@ for sch in queuing.known_schedulers:
 if scheduler is None:
     scheduler_options = None
     if args.level in [0, 1]:
-        sys.exit('Info about the scheduler should be provided when VS level is specified!')
-
-if args.level != 0 and args.update:
-    print "Update option not configured to work with VS level 1. Setting it to 0..."
-    args.level == 0
+        sys.exit('Info about the scheduler should be provided when level option is specified!')
 
 if args.level == 1:
     if args.nligands_per_job is None:
-        sys.exit('nligands_per_job option should be specified when VS level is 1!')
+        sys.exit('The -nligands-per-job option should be specified when level is 1!')
 
 locals().update(args.__dict__)
 exts = list(set([os.path.splitext(ff)[1] for ff in input_files_r]))
@@ -149,14 +123,15 @@ if exts[0] == '.pdb': # if input files are pdbfiles
     ntargets = len(input_files_r)
     nid_digits = max(3, len(str(ntargets)))
     targetids = []
+
     for jdx, file_r in enumerate(input_files_r):
         targetids.append('target'+(nid_digits-len(str(jdx+1)))*'0' + str(jdx+1))
     csvfile_r = None
     is_csvfile_r = False
+
 elif exts[0] == '.csv': # if input files is the csvfile
     if len(args.input_files_r) != 1:
         raise ValueError("More than 1 csvfile specified with -r option.")
-
     csvfile_r = os.path.abspath(args.input_files_r[0])
     df_targets = pd.read_csv(csvfile_r)
 
@@ -164,98 +139,37 @@ elif exts[0] == '.csv': # if input files is the csvfile
     ntargets = len(input_files_r)
     targetids = list(df_targets['targetID'])
     is_csvfile_r = True
-else:
-    raise IOError("Extension of files used with -r option not recognized!")
 
+else:
+    raise ValueError("target files should be in csv or pdb formats!")
 use_target_folder = True
-exts_l = list(set([os.path.splitext(ff)[1] for ff in args.input_files_l]))
-if len(exts_l) != 1: # if more than one extension provided
-    raise ValueError("All files specified with -l option must have the same extension!")
 
 # check ligand input files
-input_files_l = []
-if exts_l[0] == '.mol2': # if input files are .mol2
-    for file_l in args.input_files_l:
-        if os.path.exists(file_l):
-            input_files_l.append(os.path.abspath(file_l))
-        else:
-            raise ValueError("File %s not found!"%(file_l))
-
-    nligands = len(input_files_l)
-    nid_digits = max(3, len(str(nligands)))
-    ligandids = []
-
-    for jdx, file_r in enumerate(input_files_l): 
-        nligands_file_l = utils.get_number_of_compounds(file_l)
-        if nligands_file_l == 1:
-            ligandids.append('lig'+(nid_digits-len(str(jdx+1)))*'0' + str(jdx+1))
-        else:
-            raise IOError("Every ligand file should contain at least 1 structure, or use the prepare_compounds routine!")
-    csvfile_l = None
-    is_csvfile_l = False
-    use_isomer_folder = False
-
-elif exts_l[0] == '.csv': # if input files is a csvfile
-    if len(args.input_files_l) != 1:
-        raise ValueError("More than 1 csvfile specified with -l option.")
-
-    csvfile_l = os.path.abspath(args.input_files_l[0])
-    df_ligands = pd.read_csv(csvfile_l)
-
-    input_files_l = [os.path.abspath(ff) for ff in list(df_ligands['file_origin'])]
-    input_files_l_indices = list(df_ligands['index'])
-
-    nligands = len(input_files_l)
-    ligandids = list(df_ligands['ligID'])
-    isomers = list(df_ligands['isomer'])
-
-    is_csvfile_l = True
-    if all(x==1 for x in isomers):
-        use_isomer_folder = False
-    else:
-        use_isomer_folder = True
+suffix, ext = os.path.splitext(args.input_file_l)
+if ext == '.csv': # if input files is a csvfile
+    csvfile_l = os.path.abspath(args.input_file_l)
+    nligands = int(subprocess.check_output("wc -l %s"%csvfile_l, shell=True).split()[0])-1
+    csv_iterator = pd.read_csv(csvfile_l, low_memory=False, iterator=True, chunksize=10000)
 else:
-    raise IOError("Extension of files used with -r option not recognized!")
+    raise ValueError("Ligand file should be in csv format!")
 
-if extend or update:
-    if extend:
-        runscript_suff = 'run_extended'
-    else:
-        runscript_suff = 'run'
-    workdirs_update = []
-    if not os.path.isdir(rundir):
-        raise IOError("update was asked but no VS folder was found!")
+runscript_suffix = 'run'
+# always overwrite by default
+shutil.rmtree(rundir, ignore_errors=True)
+os.mkdir(rundir)
 
-    # determine if subfolders were used last time
-    if glob(rundir+'/lig*/lig*'):
-        use_subfolders = True
-        # list all subfolders
-        subfolders = sorted(glob(rundir+'/lig*'))
-        # deduce the number of ligands per bins used
-        nligands_per_bin = len(glob(subfolders[0]+'/lig*'))
+nlayers = 0
+nfolders_layer = nligands
+nfolders_per_layer = args.nfolders_per_layer
 
-        if update:
-            # get information about the last subfolder (as it will change because we are adding compounds)
-            subfolder_last_old = subfolders[-1]
-            minbin_str_last_old = subfolder_last_old.split('/')[-1].split('-')[0][3:] # the first ligID in that subfolder won't change though
-    else:
-        use_subfolders = False # no subfolders were used before
-else:
-    runscript_suff = 'run'
-    # always overwrite by default
-    shutil.rmtree(rundir, ignore_errors=True)
-    os.mkdir(rundir)
+# check how many folder layers are needed
+while nfolders_layer/nfolders_per_layer > 1: #and nfolders_layer >= 500:
+    nlayers += 1
+    nfolders_layer_new = nfolders_layer/nfolders_per_layer
 
-    # check if the number of ligands is large enough to consider subfolders
-    if nligands > nligands_per_bin:
-        nligands_per_bin = nligands_per_bin
-        use_subfolders = True
-        if nligands_per_subbin > 0 and nligands_per_bin > nligands_per_subbin:
-            use_subsubfolders = True
-        else:
-            use_subsubfolders = False
-    else:
-        use_subfolders = False
+    if nfolders_layer%nfolders_per_layer > 0:
+        nfolders_layer_new += 1
+    nfolders_layer = nfolders_layer_new
 
 if not os.path.isfile(config_file):
     raise ValueError("Config file %s not found!"%config_file)
@@ -341,24 +255,7 @@ boxsize = %(boxsize_conf)s"""% locals()
                     tmpf.write(newsite_section+'\n')
     shutil.move(tmp_config_file, new_config_file)
 
-def get_babel_command(file_l, index=None):
-
-    suffix, ext = os.path.splitext(file_l)
-    extout = '.mol2'
-    for fmt in known_formats:
-        if ext == fmt:
-            input_format_flag = '-i' + ext[1:]
-            output_format_flag = '-o' + extout[1:]
-            if fmt in ['.smi', '.sdf']:
-                other_flags = '--gen3D'
-            else:
-                other_flags = ''
-
-    return 'babel %s %s %s ligand.mol2 -f %s -l %s %s 2>/dev/null'%(input_format_flag, file_l, output_format_flag, index, index, other_flags)
-
 config_file_basename = os.path.basename(config_file)
-
-# copy config files
 config_suff, config_ext = os.path.splitext(config_file_basename)
 
 configdir = config_suff
@@ -367,174 +264,130 @@ os.mkdir(configdir)
 
 config_files = []
 for idx, file_r in enumerate(input_files_r):
+
     recid = targetids[idx]
     new_config_file = configdir + '/' + config_suff + '_%s'%(idx+1) + config_ext
 
     update_config_file(new_config_file, config_file, recid, sitecsv)
     config_files.append(new_config_file)
 
-subdirs = []
-for jdx in range(nligands):
-    ligid = ligandids[jdx]
-    subdir = rundir
-    if use_subfolders:
-        minbin = (int(ligid[3:])-1)/nligands_per_bin
-        minbin = minbin*nligands_per_bin + 1
+def get_subdir_from_ligid(ligid, layer_idx=1):
+    """get subdirectory name"""
+    minbin = (int(ligid[3:])-1)/nfolders_per_layer**layer_idx
+    minbin = minbin*nfolders_per_layer**layer_idx + 1
 
-        maxbin = min(minbin + nligands_per_bin - 1, nligands)
+    maxbin = min(minbin+nfolders_per_layer**layer_idx - 1, nligands)
 
-        minbin_str = str(minbin)
-        minbin_str = (len(ligid[3:])-len(minbin_str))*'0'+minbin_str
+    minbin_str = str(minbin)
+    maxbin_str = str(maxbin)
 
-        maxbin_str = str(maxbin)
-        maxbin_str = (len(ligid[3:])-len(maxbin_str))*'0'+maxbin_str
+    minbin_str = (len(ligid[3:])-len(minbin_str))*'0'+minbin_str
+    maxbin_str = (len(ligid[3:])-len(maxbin_str))*'0'+maxbin_str
+    return '/lig' + minbin_str + '-' + maxbin_str
 
-        subdir += '/lig' + minbin_str + '-' + maxbin_str
-        if update:
-            if minbin_str == minbin_str_last_old and os.path.isdir(subfolder_last_old):
-                os.rename(subfolder_last_old, subdir)
-
-        if use_subsubfolders:
-            # determine the name of the corresponding subsubfolder
-            minbin = (int(ligid[3:])-1)/nligands_per_subbin
-            minbin = minbin*nligands_per_subbin + 1
-            maxbin = min(minbin + nligands_per_subbin - 1, nligands)
-
-            minbin_str = str(minbin)
-            minbin_str = (len(ligid[3:])-len(minbin_str))*'0'+minbin_str
-
-            maxbin_str = str(maxbin)
-            maxbin_str = (len(ligid[3:])-len(maxbin_str))*'0'+maxbin_str
-            subdir += '/lig' + minbin_str + '-' + maxbin_str
-
-        if update:
-            if minbin_str == minbin_str_last_old and os.path.isdir(subfolder_last_old):
-                os.rename(subfolder_last_old, subdir)
-
-    subdirs.append(subdir)
-    for idx in range(ntargets):
-        recid = targetids[idx]
-        if use_isomer_folder and use_target_folder:
-            workdir = subdir + '/' + ligid + '/' + recid + '/isomer' + str(isomers[jdx])
-        elif use_isomer_folder:
-            workdir = subdir + '/' + ligid + '/isomer' + str(isomers[jdx])
-        elif use_target_folder:
-            workdir = subdir + '/' + ligid + '/' + recid
-        else:
-            workdir = subdir + '/' + ligid
-
-        # create list of relative paths for targets and receptors
-        if jdx == 0 and idx == 0:
-            input_files_l_rel = []
-            for file_l in input_files_l:
-                input_files_l_rel.append(os.path.relpath(file_l, workdir))
-
-            input_files_r_rel = []
-            for file_r in input_files_r:
-                input_files_r_rel.append(os.path.relpath(file_r, workdir))
-
-            config_files_rel = []
-            for file_c in config_files:
-                config_files_rel.append(os.path.relpath(file_c, workdir))
-
-        if update:
-            if os.path.isdir(workdir):
-                continue
-            else:
-                workdirs_update.append(workdir)
-                os.makedirs(workdir)
-        elif not extend:
-            os.makedirs(workdir)
-
-        script = ""
-        if level == 0:
-            filename = workdir + "/" + runscript_suff + "." + scheduler
-            script += queuing.make_header(scheduler_options, scheduler)
-        else:
-            filename = workdir + "/" + runscript_suff + ".sh"
-            script += '#!/bin/bash'
-        script += "\n\n" + get_babel_command(input_files_l_rel[jdx], index=input_files_l_indices[jdx])
-        script += "\nrundbx -f %s -l ligand.mol2 -r %s"%(config_files_rel[idx], input_files_r_rel[idx])
-        if rescore_only:
-            script += " -rescore_only"
-        script += "\nrm -rf ligand.mol2"
-
-        with open(filename, 'w') as ff:
-            ff.write(script)
-
-if level is not None:
+if args.level in [0, 1]:
     scriptdir = 'to_submit_' + rundir
     shutil.rmtree(scriptdir, ignore_errors=True)
     os.mkdir(scriptdir)
     submit_all_filename = scriptdir + '/submit_all.sh'
 
+ligand_idx_abs = 0
+jobidx = 0
+workdirs_script = []
+
+for chunk in csv_iterator:
+    input_files_l = [os.path.abspath(f) for f in list(chunk['file_origin'])]
+    input_files_l_indices = list(chunk['index'])
+
+    ligand_ids = list(chunk['ligID'])
+    for jdx, ligid in enumerate(ligand_ids):
+        ligand_idx_abs += 1
+        subdir = rundir
+        for layer_idx in range(nlayers, 0, -1):
+            subdir += get_subdir_from_ligid(ligid, layer_idx=layer_idx)  
+
+        for idx in range(ntargets):
+            recid = targetids[idx]
+            if use_target_folder:
+                workdir = subdir + '/' + ligid + '/' + recid
+            else:
+                workdir = subdir + '/' + ligid
+            if idx == 0:
+                input_file_l_rel = os.path.relpath(input_files_l[jdx], start=workdir)
+            if idx == 0 and jdx == 0:
+                input_files_r_rel = []
+                for file_r in input_files_r:
+                    input_files_r_rel.append(os.path.relpath(file_r, start=workdir))
+ 
+                config_files_rel = []
+                for file_c in config_files:
+                    config_files_rel.append(os.path.relpath(file_c, start=workdir))
+            os.makedirs(workdir)
+
+            script = ""
+            if level == 0:
+                filename = workdir + "/" + runscript_suffix + "." + scheduler
+                script += queuing.make_header(scheduler_options, scheduler)
+            else:
+                filename = workdir + "/" + runscript_suffix + ".sh"
+                script += '#!/bin/bash'
+                script += "\n\n" + utils.get_babel_command(input_file_l_rel, index=input_files_l_indices[jdx])
+                script += "\nrundbx -f %s -l ligand.mol2 -r %s"%(config_files_rel[idx], input_files_r_rel[idx])
+            if rescore_only:
+                script += " -rescore_only"
+            script += "\nrm -rf ligand.mol2"
+
+            with open(filename, 'w') as ff:
+                ff.write(script)
+
+        if level == 1:
+            # update workdirs for scripts
+            workdir_script = subdir + '/' + ligid
+            if use_target_folder:
+                workdir_script += '/target*' 
+            workdirs_script.append(workdir_script)
+
+            if ligand_idx_abs > 1 and (ligand_idx_abs%nligands_per_job == 0 or ligand_idx_abs == nligands):
+                jobidx += 1 
+                script = queuing.make_header(scheduler_options, scheduler, jobname="vs%s"%jobidx, output=scheduler+"-vs-%s.out"%jobidx, error=scheduler+"-vs-%s.err"%jobidx) 
+                workdirs_script_str = ' '.join(workdirs_script)
+                script += """\nset -e
+dirs=`echo %(workdirs_script_str)s`
+curdir=`pwd`
+for dir in $dirs; do
+  cd $dir
+  bash %(runscript_suffix)s.sh
+  cd $curdir
+done\n"""%locals()
+                with open(scriptdir+'/run_vs_%i.'%jobidx+scheduler, 'w') as ff:
+                    ff.write(script)
+                workdirs_script = []
+
 if level == 0:
-    if update:
-        dirs = ' '.join(workdirs_update)
-        line_iterate = "dirs=`echo %s`\nfor dir in $dirs; do"%dirs
-    else:
-        dirs = rundir
-        if use_subfolders:
-            dirs += '/lig*'
-            if use_subsubfolders:
-                dirs += '/lig*'
+    dirs = rundir
+    if use_subfolders:
         dirs += '/lig*'
-        if use_target_folder:
-            dirs += '/target*'
-        if use_isomer_folder:
-            dirs += '/isomer*'
-        line_iterate = "for dir in %s; do"%dirs
+        if use_subsubfolders:
+            dirs += '/lig*'
+    dirs += '/lig*'
+    if use_target_folder:
+        dirs += '/target*'
+    if use_isomer_folder: 
+        dirs += '/isomer*'
+    line_iterate = "for dir in %s; do"%dirs
     # write script to submit all jobs
     script_all = """#!/bin/bash
-set -e
+set -e  
 curdir=`pwd`
 %(line_iterate)s
   cd $dir
-  %(exe)s %(runscript_suff)s.%(scheduler)s
+  %(exe)s %(runscript_suffix)s.%(scheduler)s
   cd $curdir
 done\n"""%locals()
     with open(submit_all_filename, 'w') as ff:
         ff.write(script_all)
+
 elif level == 1:
-    # create jobs to be submitted
-    nscripts = nligands/nligands_per_job
-
-    for idx in range(nscripts+1):
-        if idx < nscripts:
-            idx_first = idx*nligands_per_job
-            idx_last = (idx+1)*nligands_per_job-1
-        elif idx == nscripts:
-            nligands_last_job = nligands - nscripts*nligands_per_job
-            if nligands_last_job != 0:
-                idx_first = nscripts*nligands_per_job
-                idx_last = nscripts*nligands_per_job + nligands_last_job - 1
-            else:
-                break
-        index = idx + 1
-        script = queuing.make_header(scheduler_options, scheduler, jobname="vs%s"%index, output=scheduler+"-vs-%s.out"%index, error=scheduler+"-vs-%s.err"%index)
-
-        workdirs = []
-        for jdx in range(idx_first, idx_last+1):
-            dir = subdirs[jdx] + '/' + ligandids[jdx]
-            if use_target_folder:
-                dir += '/target*'
-            if use_isomer_folder:
-                dir += '/isomer' + str(isomers[jdx])
-            workdirs.append(dir)
-
-        workdirs_str = ' '.join(workdirs)
-        script += """\nset -e
-dirs=`echo %(workdirs_str)s`
-curdir=`pwd`
-for dir in $dirs; do
-  cd $dir
-  bash %(runscript_suff)s.sh
-  cd $curdir
-done\n"""%locals()
-
-        with open(scriptdir+'/run_vs_%i.'%index+scheduler, 'w') as ff:
-            ff.write(script)
-
     with open(submit_all_filename, 'w') as ff:
         ff.write("""#!/bin/bash
 set -e

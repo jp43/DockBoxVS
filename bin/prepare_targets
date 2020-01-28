@@ -44,10 +44,11 @@ parser.add_argument('-flags',
     metavar='STRING',
     help='prepwizard flags for protein preparation. Default: "-fix -pH \'neutral\'"')
 
-parser.add_argument('-update',
+parser.add_argument('-append',
     action='store_true',
+    dest='append',
     default=False,
-    help='Update from previous simulations')
+    help='Add targets to existing targets!')
 
 args = parser.parse_args()
 
@@ -111,14 +112,14 @@ for file_r in args.input_files_r:
 ntargets = len(input_files_r)
 
 dirname, ext = os.path.splitext(args.csvfile)
-if args.update and not os.path.isfile(args.csvfile):
-    raise IOError("update was asked but .csv file %s with targets not found"%args.csvfile)
+if args.append and not os.path.isfile(args.csvfile):
+    raise IOError("append option was provided but .csv file %s with targets not found"%args.csvfile)
 
-if args.update and not os.path.isdir(dirname):
-    raise IOError("update was asked but directory %s with targets not found"%dirname)
+if args.append and not os.path.isdir(dirname):
+    raise IOError("append option was specified but directory %s with targets not found"%dirname)
 
 nid_digits = max(3, len(str(ntargets)))
-if args.update:
+if args.append:
     # load old database
     df_old = pd.read_csv(args.csvfile)
     targetid_last = df_old.iloc[-1]['targetID']
@@ -141,7 +142,6 @@ for idx, file_r in enumerate(input_files_r):
     jdx = shift + idx + 1
     targetid = 'target' + (nid_digits-len(str(jdx)))*'0' + str(jdx)
     dir_r = dirname + '/' + targetid
-
     # create target directory
     os.mkdir(dir_r)
     os.chdir(dir_r)
@@ -162,6 +162,6 @@ for idx, file_r in enumerate(input_files_r):
     info['pdbfile'].append(os.path.relpath(pdbfile))
 
 df = pd.DataFrame(info)
-if args.update:
+if args.append:
     df = pd.concat([df_old, df]).reset_index()
 df[features].to_csv(args.csvfile, index=False)

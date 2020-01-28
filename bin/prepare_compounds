@@ -1,14 +1,9 @@
 #!/usr/bin/env python
 import os
 import sys
-import shutil
-import stat
 import subprocess
 
-from glob import glob
-
 import argparse
-import ConfigParser
 import pandas as pd
 
 known_formats = ['.sdf', '.smi', '.mol2']
@@ -26,6 +21,12 @@ parser.add_argument('-csv',
     dest='csvfile',
     default='compounds.csv',
     help='output .csv filename (default: compounds.csv)')
+
+parser.add_argument('-append',
+    action='store_true',
+    dest='append',
+    default=False,
+    help='Add compounds to existing molecules in compounds.csv!')
 
 args = parser.parse_args()
 
@@ -48,53 +49,111 @@ nligands_per_file = []
 
 input_files_l = []
 input_files_l_exts = []
-
+# check if ligand files exist and how many compounds they contain
 for file_l in args.input_files_l:
-
     if os.path.exists(file_l):
         input_files_l.append(os.path.abspath(file_l))
-        nligands_per_file.append(get_compounds_number(file_l))
         input_files_l_exts.append(os.path.splitext(file_l)[1])
-
+        nligands_per_file.append(get_compounds_number(file_l))
     else:
         raise ValueError("File %s not found!"%(file_l))
 
+# in case append option is provided, check if the csv file is already there
+if args.append and not os.path.isfile(args.csvfile):
+    raise ValueError("append option was specified but csvfile %s with compounds not found!"%args.csvfile)
+
 nfiles = len(nligands_per_file)
 nligands = sum(nligands_per_file)
-print "%i compounds detected..."%nligands
+print "%i compounds detected..."%nligands # total number of compounds
 
-nid_digits = max(3, len(str(nligands)))
-shift = 0 # when not updating, the shift is zero
+if args.append:
+    # load old database
+    df_old = pd.read_csv(args.csvfile)
+    ligid_last = df_old.iloc[-1]['ligID'] # get last ligand ID from old database
 
-info = {}
-features = ['ligID', 'file_origin', 'index', 'name', 'isomer']
-for ft in features:
-    info[ft] = []
+    # get number of ligands in old database and number of digits used for ligID
+    nligands_old = int(ligid_last[3:])
+    nid_digits_old = len(ligid_last[3:])
 
+    # the new number of ligands is the old number plus the number of compounds added
+    nligands += nligands_old
+    nid_digits = max(3, len(str(nligands)))
+
+    # make sure that we are not adding too much compounds so the number of digits should change
+    # TODO: handle case when it does
+    if nid_digits > nid_digits_old:
+        raise ValueError("Number of compounds provided for extension too large!")
+    shift = nligands_old # treat the old number of ligands as a shift in ligand id numbering
+else:
+    # when not appending, do not update the number of ligands
+    nid_digits = max(3, len(str(nligands)))
+    shift = 0 # when not updating, the shift is zero
+
+# features to be stored about compounds
+features = ['ligID', 'file_origin', 'index', 'name']
+def initialize_info():
+    info = {}
+    for ft in features:
+        info[ft] = []
+    return info    
+
+def save_to_csv(csvfile, info, mode='w'):
+    df = pd.DataFrame(info)
+    # save ligand information in csvfile
+    if mode == 'w':
+        df[features].to_csv(csvfile, index=False) 
+    elif mode == 'a':
+        df[features].to_csv(csvfile, mode='a', index=False, header=False)
+
+def get_compound_name(file, ext):
+    if ext == '.smi':
+        name = ff.next().split()[-1]
+    elif ext == '.sdf':
+        raise NotImplemented
+    elif ext == '.mol2':
+        for line in ff:
+            if line.startswith('@<TRIPOS>MOLECULE'):
+                name = '_'.join(ff.next().split())
+                break 
+    else:
+        raise ValueError("File format not recognized!")
+    return name
+
+def checkpoint(index, nsave, csvfile, info, append=False):
+    """save and re-initialize info if needed"""
+    if index == nsave and not append:
+        save_to_csv(csvfile, info, mode='w')
+        info = initialize_info()
+    elif index%nsave == 0:
+        save_to_csv(csvfile, info, mode='a')
+        info = initialize_info()
+    return info
+
+def checkpoint_last(index, nsave, csvfile, info, append=False):
+    """save info one last time"""
+    if info['ligID']:
+        if index < nsave and not append:
+            mode = 'w'
+        else:
+            mode = 'a'
+        save_to_csv(csvfile, info, mode=mode)
+
+nsave = 10000 # save information every nsave
+info = initialize_info()
 for ldx, file_l in enumerate(input_files_l):
     ext = input_files_l_exts[ldx]
     with open(file_l) as ff:
         for jdx in range(nligands_per_file[ldx]):
             # ID of ligand (depends on the shift used)
             kdx = jdx + shift + 1
-            ligid = 'lig' + (nid_digits-len(str(kdx)))*'0' + str(kdx)
 
-            info['ligID'].append(ligid)
+            # save regularly to avoid memory problems
+            info = checkpoint(kdx, nsave, args.csvfile, info, append=args.append)
+            # store info about ligand
+            info['ligID'].append('lig' + (nid_digits-len(str(kdx)))*'0' + str(kdx))
             info['file_origin'].append(os.path.relpath(file_l))
             info['index'].append(jdx+1)
-            name = None
-            if ext == '.smi':
-                name = ff.next().split()[-1]
-            elif ext == '.sdf':
-                raise NotImplemented
-            elif ext == '.mol2':
-                for line in ff:
-                    if line.startswith('@<TRIPOS>MOLECULE'):
-                        name = '_'.join(ff.next().split())
-                        break
-            info['name'].append(name)
-            info['isomer'].append(1)
+            info['name'].append(get_compound_name(ff, ext)) # get compound name
     shift = kdx
 
-df = pd.DataFrame(info)
-df[features].to_csv(args.csvfile, index=False)
+checkpoint_last(kdx, nsave, args.csvfile, info, append=args.append) # last save if needed
