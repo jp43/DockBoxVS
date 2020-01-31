@@ -351,8 +351,7 @@ for chunk in csv_iterator:
                 jobidx += 1 
                 script = queuing.make_header(scheduler_options, scheduler, jobname="vs%s"%jobidx, output=scheduler+"-vs-%s.out"%jobidx, error=scheduler+"-vs-%s.err"%jobidx) 
                 workdirs_script_str = ' '.join(workdirs_script)
-                script += """\nset -e
-dirs=`echo %(workdirs_script_str)s`
+                script += """\ndirs=`echo %(workdirs_script_str)s`
 curdir=`pwd`
 for dir in $dirs; do
   cd $dir
@@ -377,7 +376,6 @@ if level == 0:
     line_iterate = "for dir in %s; do"%dirs
     # write script to submit all jobs
     script_all = """#!/bin/bash
-set -e  
 curdir=`pwd`
 %(line_iterate)s
   cd $dir
@@ -390,7 +388,6 @@ done\n"""%locals()
 elif level == 1:
     with open(submit_all_filename, 'w') as ff:
         ff.write("""#!/bin/bash
-set -e
 for file in %(scriptdir)s/run_vs_*.%(scheduler)s; do
   %(exe)s $file
 done"""%locals())
