@@ -84,6 +84,7 @@ if exts[0] == '.pdb': # if input files are pdbfiles
     targetids = []
     for jdx, file_r in enumerate(input_files_r):
         targetids.append('target'+(nid_digits-len(str(jdx+1)))*'0' + str(jdx+1))
+
 elif exts[0] == '.csv': # if input files is the csvfile
     if len(args.input_files_r) != 1:
         raise ValueError("More than 1 csvfile specified with -r option.")
@@ -91,6 +92,7 @@ elif exts[0] == '.csv': # if input files is the csvfile
     input_files_r = [os.path.abspath(ff) for ff in list(df_targets['pdbfile'])]
     ntargets = len(input_files_r)
     targetids = list(df_targets['targetID'])
+
 else:
     raise IOError("Extension of files used with -r option not recognized!")
 

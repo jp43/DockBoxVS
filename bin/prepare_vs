@@ -11,6 +11,8 @@ import pandas as pd
 from dockbox_vs import queuing
 from dockbox_vs import utils
 
+nfolders_per_layer = 100 # number of folders per VS layer 
+
 parser = argparse.ArgumentParser(description="Build directories and config files for Virtual Screening (4th stage)")
 
 parser.add_argument('-l',
@@ -43,25 +45,12 @@ parser.add_argument('-level',
     default=None,
     help='Level of screening considered. 0: few compounds; 1: large number of compounds.')
 
-parser.add_argument('-nfolders',
-    dest='nfolders_per_layer',
-    type=int,
-    metavar='INT',
-    default=100,
-    help='Number of folders in a layer (default: 100)')
-
-parser.add_argument('-nligands-per-job',
+parser.add_argument('-ligands-per-job',
     dest='nligands_per_job',
     type=int,
     metavar='INT',
     default=None,
     help='Number of ligands to be run for every submitted job (used for VS level 1))')
-
-parser.add_argument('-rescore-only',
-    dest='rescore_only',
-    action='store_true',
-    default=False,
-    help='Rescore only with DockBox!')
 
 parser.add_argument('-s',
     dest='sitecsv',
@@ -128,7 +117,6 @@ if exts[0] == '.pdb': # if input files are pdbfiles
         targetids.append('target'+(nid_digits-len(str(jdx+1)))*'0' + str(jdx+1))
     csvfile_r = None
     is_csvfile_r = False
-
 elif exts[0] == '.csv': # if input files is the csvfile
     if len(args.input_files_r) != 1:
         raise ValueError("More than 1 csvfile specified with -r option.")
@@ -139,9 +127,9 @@ elif exts[0] == '.csv': # if input files is the csvfile
     ntargets = len(input_files_r)
     targetids = list(df_targets['targetID'])
     is_csvfile_r = True
-
 else:
     raise ValueError("target files should be in csv or pdb formats!")
+
 use_target_folder = True
 
 # check ligand input files

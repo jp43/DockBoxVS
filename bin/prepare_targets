@@ -13,7 +13,11 @@ import pandas as pd
 from mdkit.amber.ambertools import load_PROTON_INFO
 from mdkit.amber.ambertools import load_atomic_ions
 
-equivalent_residues = {'CYM': 'CYS', 'LYN': 'LYS', 'GLZ': 'GLY', 'ASQ': 'ASP', 'LEV': 'LEU'}
+equivalent_residues = {'CYM': 'CYS',
+'LYN': 'LYS',
+'GLZ': 'GLY',
+'ASQ': 'ASP',
+'LEV': 'LEU'}
 
 known_formats = ['.pdb']
 parser = argparse.ArgumentParser(description="Prepare target files for Virtual Screening (2nd stage)")
@@ -145,7 +149,7 @@ for idx, file_r in enumerate(input_files_r):
     # create target directory
     os.mkdir(dir_r)
     os.chdir(dir_r)
-
+    # prepare targets
     if args.prepwizard:
         pdbfile_prep = prepare_structure_with_prepwizard(file_r, args.prepwizard_flags)
         pdbfile = os.path.basename(pdbfile_prep)
