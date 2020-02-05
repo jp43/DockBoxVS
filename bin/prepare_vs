@@ -131,7 +131,6 @@ else:
     raise ValueError("target files should be in csv or pdb formats!")
 
 use_target_folder = True
-
 # check ligand input files
 suffix, ext = os.path.splitext(args.input_file_l)
 if ext == '.csv': # if input files is a csvfile
@@ -143,8 +142,8 @@ else:
 
 runscript_suffix = 'run'
 # always overwrite by default
-shutil.rmtree(rundir, ignore_errors=True)
-os.mkdir(rundir)
+shutil.rmtree(args.rundir, ignore_errors=True)
+os.mkdir(args.rundir)
 
 nlayers = 0
 nfolders_layer = nligands
@@ -259,22 +258,8 @@ for idx, file_r in enumerate(input_files_r):
     update_config_file(new_config_file, config_file, recid, sitecsv)
     config_files.append(new_config_file)
 
-def get_subdir_from_ligid(ligid, layer_idx=1):
-    """get subdirectory name"""
-    minbin = (int(ligid[3:])-1)/nfolders_per_layer**layer_idx
-    minbin = minbin*nfolders_per_layer**layer_idx + 1
-
-    maxbin = min(minbin+nfolders_per_layer**layer_idx - 1, nligands)
-
-    minbin_str = str(minbin)
-    maxbin_str = str(maxbin)
-
-    minbin_str = (len(ligid[3:])-len(minbin_str))*'0'+minbin_str
-    maxbin_str = (len(ligid[3:])-len(maxbin_str))*'0'+maxbin_str
-    return '/lig' + minbin_str + '-' + maxbin_str
-
 if args.level in [0, 1]:
-    scriptdir = 'to_submit_' + rundir
+    scriptdir = 'to_submit_' + args.rundir
     shutil.rmtree(scriptdir, ignore_errors=True)
     os.mkdir(scriptdir)
     submit_all_filename = scriptdir + '/submit_all.sh'
@@ -290,9 +275,9 @@ for chunk in csv_iterator:
     ligand_ids = list(chunk['ligID'])
     for jdx, ligid in enumerate(ligand_ids):
         ligand_idx_abs += 1
-        subdir = rundir
+        subdir = args.rundir
         for layer_idx in range(nlayers, 0, -1):
-            subdir += get_subdir_from_ligid(ligid, layer_idx=layer_idx)  
+            subdir += utils.get_subdir_from_ligid(ligid, layer_idx=layer_idx)  
 
         for idx in range(ntargets):
             recid = targetids[idx]
@@ -351,7 +336,7 @@ done\n"""%locals()
                 workdirs_script = []
 
 if level == 0:
-    dirs = rundir
+    dirs = args.rundir
     if use_subfolders:
         dirs += '/lig*'
         if use_subsubfolders:

@@ -2,14 +2,16 @@
 import os
 import sys
 import argparse
+import subprocess
 import ConfigParser
 import shutil
 
+from time import time
 from glob import glob
-import numpy as np
 import pandas as pd
 
 from dockbox_vs import queuing
+from dockbox_vs import utils
 
 #TODO: add the possibilty to prepare scripts for torque and ll
 parser = argparse.ArgumentParser(description="Check Virtual Screening Level 1!")
@@ -46,151 +48,90 @@ for sch in queuing.known_schedulers:
         help='Options for %s'%queuing.known_schedulers[sch])
 
 args = parser.parse_args()
-vsdir = args.vsdir
 
-tosubdir = 'to_submit_' + vsdir
-if not os.path.isdir(vsdir):
-    sys.exit('Working directory %s does not exist'%vsdir)
-
-if not os.path.isdir(tosubdir):
-    sys.exit('Working directory %s does not exist'%tosubdir)
+use_target_folder = True
 
 config = ConfigParser.SafeConfigParser()
 config.read(args.config_file)
-
-is_rescoring = False
-scoring_functions = None
 # get names of docking programs from config file
 if config.has_option('DOCKING', 'rescoring'):
     is_rescoring_config = config.get('DOCKING', 'rescoring').lower()
     if is_rescoring_config in ['yes', 'true']:
-        scoring_functions = config.get('RESCORING', 'program').lower()
-        scoring_functions = map(str.strip, scoring_functions.split(','))
+        programs = config.get('RESCORING', 'program').lower()
         is_rescoring = True
-
-workdir = vsdir
-#check if subdirs are there
-is_subdirs = False
-if glob(workdir+'/lig*-*'):
-    is_subdirs = True
-
-hierarchy = ['lig', 'target', 'isomer']
-subdirs = []
-IDs = {}
-for item in hierarchy:
-    if is_subdirs and item == 'lig':
-        dirs = sorted(glob(workdir+'/lig*-*/'+item+'*'))
     else:
-        dirs = sorted(glob(workdir+'/'+item+'*'))
-    ndirs = len(dirs)
-    if ndirs > 0:
-        IDs_tmp = []
-        for dir in dirs:
-            IDs_tmp.append('/'.join(dir.split('/')[1:]))
-        IDs_tmp == sorted(IDs_tmp)
-        if is_subdirs and item == 'lig':
-            subdirs = [dir.split('/')[0] for dir in IDs_tmp]
-            IDs[item] = [dir.split('/')[1] for dir in IDs_tmp]
-            workdir += '/' + subdirs[0] + '/' + IDs[item][0]
-        else:
-            IDs[item] = [dir.split('/')[-1] for dir in IDs_tmp]
-            workdir += '/' + IDs[item][0]
+        programs = config.get('DOCKING', 'program').lower() 
+        is_rescoring = False
+else:
+    is_rescoring = False
+    programs = config.get('DOCKING', 'program').lower() 
+
+programs = map(str.strip, programs.split(','))
+last_program = programs[-1]
+
+def is_layer(directory):
+    base = os.path.basename(directory)
+    if base[:3] == 'lig' and len(base.split('-')) == 2: 
+        return True
     else:
-        IDs[item] = None
+        return False
 
-is_done = []
-if IDs['lig']:
-    for idx, ligID in enumerate(IDs['lig']):
-        if is_subdirs:
-            workdir = vsdir + '/' + subdirs[idx]  + '/' + ligID
-        else:
-            workdir = vsdir + '/' + ligID
-        if IDs['target']:
-            workdir += '/' + IDs['target'][-1]
-        if IDs['isomer']:
-            workdir += '/' + IDs['isomer'][-1]
-        is_done_ligand = False
-        # check if job was done
-        if is_rescoring:
-           if os.path.isfile(workdir+'/rescoring/'+scoring_functions[-1]+'.score'):
-               is_done_ligand = True
-        elif os.path.isfile(workdir+'/poses/info.dat'):
-           is_done_ligand = True
-        is_done.append(is_done_ligand)
+nlayers = 0
+checked_dir = sorted(glob(args.vsdir+'/*'))[-1]
+while is_layer(checked_dir):
+    nlayers += 1
+    checked_dir = sorted(glob(checked_dir+'/*'))[-1]
 
-    is_done = np.array(is_done)
-    print "Percentage of ligands finished: %4.1f%%"%(np.sum(is_done)*100./len(is_done))
-    ids_ligands = np.array(IDs['lig'])
-    ligands_done = ids_ligands[is_done]
-    ligands_undone = ids_ligands[~is_done]
-    if is_subdirs:
-        subdirs = np.array(subdirs)
-        subdirs_undone = subdirs[~is_done]
-    #print "Ligands undone: %s"%(', '.join(ligands_undone))
+if nlayers == 0:
+    sys.exit("VS was not performed with level 1!")
+else:
+    ligid = checked_dir.split('/')[-1][3:]
+    # get number of ligands
+    nligands = int(ligid)
+    ndigits = len(ligid)
+    if use_target_folder:
+        # get last target ID
+        recdir = sorted(glob(checked_dir+'/target*'))[-1]
+        recid_last = recdir.split('/')[-1]
 
-scheduler = None
-exe = None
-for sch in queuing.known_schedulers:
-    args_dict = vars(args)
-    if args_dict[sch+'_options'] is not None:
-        scheduler = sch
-        exe = queuing.exes[sch]
-        scheduler_options = queuing.check_scheduler_options(args_dict[sch+'_options'], scheduler)
-if scheduler is None:
-    scheduler_options = None
+jobidx = 0
+ndone = 0
+workdirs_script = []
+for ligidx_abs in range(nligands):
+    tcpu1 = time()
+    ligidx_str = str(ligidx_abs+1)
+    ligid = 'lig' + '0'*(ndigits-len(ligidx_str)) + ligidx_str
+    tcpu2 = time()
 
-if scheduler is not None:
-    scriptdir = 'to_resubmit_' + args.vsdir
-    shutil.rmtree(scriptdir, ignore_errors=True)
-    os.mkdir(scriptdir)
-    submit_all_filename = scriptdir + '/submit_all.sh'
-    nligands_per_job = args.nligands_per_job
+    subdir = args.vsdir
+    for layer_idx in range(nlayers, 1, -1):
+        subdir += utils.get_subdir_from_ligid(ligid, layer_idx=layer_idx, nligands=nligands)
+    subdir += '/lig*'
 
-    # create jobs to be submitted
-    nscripts = len(ligands_undone)/nligands_per_job
+    if use_target_folder:
+        subdir += '/' + ligid + '/' + recid_last
+    else:
+        subdir += '/' + ligid
 
-    for idx in range(nscripts+1):
-        if idx < nscripts:
-            idx_first = idx*nligands_per_job
-            idx_last = (idx+1)*nligands_per_job-1
-        elif idx == nscripts:
-            nligands_last_job = len(ligands_undone) - nscripts*nligands_per_job
-            if nligands_last_job != 0:
-                idx_first = nscripts*nligands_per_job
-                idx_last = nscripts*nligands_per_job + nligands_last_job - 1
-            else:
-                break
-        index = idx + 1
-        script = queuing.make_header(scheduler_options, scheduler, jobname="vs%s"%index, output=scheduler+"-vs-%s.out"%index, error=scheduler+"-vs-%s.err"%index)
-    
-        workdirs = []
-        for jdx in range(idx_first, idx_last+1):
-            if is_subdirs:
-                dir = args.vsdir + '/' + subdirs_undone[jdx] + '/' + ligands_undone[jdx]
-            else:
-                dir = args.vsdir + '/' + ligands_undone[jdx]
-            if IDs['target'] is not None:
-                dir += '/target*'
-            if IDs['isomer'] is not None:
-                dir += '/isomer*'
-            workdirs.append(dir)
-    
-        workdirs_str = ' '.join(workdirs)
-        script += """\nset -e
-dirs=`echo %(workdirs_str)s`
-curdir=`pwd`
-for dir in $dirs; do
-  cd $dir
-  bash run.sh
-  cd $curdir
-done\n"""%locals()
+    if is_rescoring:
+        file_to_be_checked = subdir + '/rescoring/%s.score'%last_program
+    else:
+        file_to_be_checked = subdir + '/%s/score.out'%last_program
 
-        with open(scriptdir+'/run_vs_%i.'%index+scheduler, 'w') as ff:
-            ff.write(script)
+    tcpu3 = time()
+    print subprocess.check_output('cat %s'%file_to_be_checked, shell=True)
+    tcpu4 = time()
 
-        with open(submit_all_filename, 'w') as ff:
-            ff.write("""#!/bin/bash
-set -e
-for file in %(scriptdir)s/run_vs_*.%(scheduler)s; do
-  %(exe)s $file
-done"""%locals())
+    #if os.path.isfile(file_to_be_checked):
+    #    is_done = True
+    #    ndone += 1
+    #else:
+    #    is_done = False
+    #tcpu4 = time()
+    print tcpu2-tcpu1, tcpu3-tcpu2, tcpu4-tcpu3
+
+    sys.exit()
+    if ligidx_abs == 10:
+        sys.exit()
+
+print "Percentage of ligands finished: %4.1f%%"%(ndone*100./nligands)
