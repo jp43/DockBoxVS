@@ -1,0 +1,625 @@
+import os
+import sys
+import shutil
+import argparse
+import subprocess
+import ConfigParser
+
+from glob import glob
+import pandas as pd
+import dask.dataframe as dd
+
+import queuing
+import utils
+
+def extract_content_from_file(filename):
+    content = []
+    with open(filename, 'r') as ff:
+        for line in ff:
+            content.append(line)
+    return content
+
+def write_content_to_file(filename, content):
+    with open(filename, 'w') as ff:
+        for line in content:
+            ff.write(line)
+
+def build_config_files_for_vs(model, targetids, csvfile):
+    """Build config files from model and csvfile file"""
+
+    config_file_basename = os.path.basename(model)
+    config_suff, config_ext = os.path.splitext(config_file_basename)
+
+    config_dir = config_suff
+    shutil.rmtree(config_dir, ignore_errors=True)
+    os.mkdir(config_dir)
+
+    new_config_files = []
+    content = extract_content_from_file(model)
+    content_no_site = remove_old_site_information(content)
+
+    # add site information
+    df_sites = pd.read_csv(csvfile)
+    for idx, targetid in enumerate(targetids):
+        new_config_file = config_dir + '/' + config_suff + '_%i'%(idx+1) + config_ext
+        new_content = add_new_site_information(content_no_site, targetid, df_sites)
+        write_content_to_file(new_config_file, new_content)
+        new_config_files.append(new_config_file)
+
+    return new_config_files
+
+def remove_old_site_information(config_file_content):
+    """Remove section 'SITE' and option site in DOCKING section of config file if exists"""
+    isdock = False
+    sitesection = False
+    docksection = False
+    new_content = []
+
+    for line in config_file_content:
+        # check if still in section SITE*
+        if line.startswith('[SITE'):
+            sitesection = True
+        if sitesection and line.startswith('[') and not line.startswith('[SITE'): # new section has been reached
+            sitesection = False
+        # check if still in section DOCKING
+        if line.startswith('[DOCKING]'):
+            docksection = True
+            isdock = True
+        if docksection and line.startswith('[') and not line.startswith('[DOCKING]'): # new section has been reached
+            docksection = False
+        # check if option line in section DOCKING
+        if line.strip().startswith('site') and docksection:
+            siteline = True
+        else:
+            siteline = False
+        if not sitesection and not siteline:
+            new_content.append(line)
+    return new_content
+
+def add_new_site_information(config_file_content, targetid, df_sites):
+    """Add section 'SITE' and site in DOCKING section according to targetid and site info"""
+
+    rows = df_sites[df_sites['targetID']==targetid]
+    if rows.empty:
+        sys.exit("No information regarding the site of target %s in .csv file"%label_r)
+    nsites = len(rows)
+
+    new_content = []
+    if nsites == 1:
+        # add new sections 'SITE' and option site
+        for line in config_file_content:
+            new_content.append(line)
+        for idx, row in rows.iterrows():
+            new_content.append("\n[SITE]\n")
+            new_content.append("center = %s\n"%(row['center']))
+            new_content.append("boxsize = %s\n"%(row['size']))
+    elif nsites > 1:
+        # add new sections 'SITE' and option site
+        for line in config_file_content:
+            new_content.append(line)
+            if line.startswith('[DOCKING]'):
+                tmpf.write('site = ' + ', '.join(['site%s'%int(row[1]['site']) for row in rows.iterrows()])+'\n')
+        for idx, row in rows.iterrows():
+            new_content.append('\n[SITE%s]\n'%str(int(row['site'])))
+            new_content.append("center = %s\n"%(row['center']))
+            new_content.append("boxsize = %s\n"%(row['size']))
+    return new_content
+
+def check_config_file(model, level):
+    suff, ext = os.path.splitext(model)
+    if ext != '.ini':
+        sys.exit("Config file must be in .ini format!")
+
+    if level == 2:
+        check_config_file_lvl2(model)
+
+def check_config_file_lvl2(model):
+    config = ConfigParser.SafeConfigParser()
+    config.read(model)
+
+    if config.has_option('DOCKING', 'rescoring'):
+        yesno = config.get('DOCKING', 'rescoring').lower()
+        if yesno == 'yes':
+            raise sys.exit("Rescoring not allowed with level 2 of VS!")
+
+    programs = config.get('DOCKING', 'program').split(',')
+    if len(programs) != 1:
+        sys.exit("Only one docking program with level 2 of VS!")
+
+def is_rescoring(config_file):
+    # check config file
+    config = ConfigParser.SafeConfigParser()
+    config.read(config_file)
+    is_rescoring = False
+
+    # check if rescoring was performed
+    if config.has_option('DOCKING', 'rescoring'):
+        is_rescoring_config = config.get('DOCKING', 'rescoring').lower()
+        if is_rescoring_config in ['yes', 'true']:
+            programs = config.get('RESCORING', 'program').lower()
+            is_rescoring = True
+    return is_rescoring
+
+def get_programs(config_file, is_rescoring=False):
+    config = ConfigParser.SafeConfigParser()
+    config.read(config_file)
+    section = is_rescoring*'RESCORING'+(not is_rescoring)*'DOCKING'
+    return config.get(section, 'program').split(',')
+
+def get_targets_info(csvfile):
+    """get information about targets"""
+    df_targets = pd.read_csv(csvfile)
+
+    input_files_r = map(lambda x: os.path.abspath(x), list(df_targets.pdbfile))
+    targetids = list(df_targets['targetID'])
+    return input_files_r, targetids
+
+def get_ligands_iterator(csvfile, chunksize=10000):
+    return pd.read_csv(csvfile, iterator=True, chunksize=chunksize)
+
+def get_number_of_ligands(csvfile):
+    nligands = int(subprocess.check_output("wc -l %s"%csvfile, shell=True).split()[0])-1
+    print "Number of compounds found: %s"%nligands
+    return nligands
+
+def create_directory(dirname, overwrite=False):
+    if overwrite:
+        shutil.rmtree(dirname, ignore_errors=True)
+    os.mkdir(dirname)
+
+class PrepareVS(object):
+
+    def __init__(self):
+        self.nfolders_per_layer = 1000 # number of folders per layer of subdirectory (level 0 or 1)
+
+    def initalize_lvl1(self):
+        nlayers = 0 # initial number of layers
+        nfolders_layer = nligands
+
+        # check how many folder layers are needed
+        while nfolders_layer/self.nfolders_per_layer > 1:
+            nlayers += 1
+            nfolders_layer_new = nfolders_layer/self.nfolders_per_layer
+
+            if nfolders_layer%self.nfolders_per_layer > 0:
+                nfolders_layer_new += 1
+            nfolders_layer = nfolders_layer_new
+        return nlayers, ""
+
+    def initalize_lvl2(self, nligands, nligands_per_job):
+        nlayers = 0
+        njobs = nligands/nligands_per_job
+        if nligands%nligands_per_job != 0:
+            njobs += 1
+        return njobs, 0, ""
+
+    def write_job_scripts(self, workdir, iterator_l, nligands, input_files_r, targetids, config_files, level, nligands_per_job=None):
+        """Write all the scripts needed"""
+        # initialize all variables
+        jobidx = 0
+        ligand_jdx_abs = 0
+        if level in [0, 1]:
+            nlayers, workdirs = self.initalize_lvl1()
+
+        elif level == 2:
+            njobs, nlayers, script = self.initalize_lvl2(nligands, nligands_per_job)
+            program = get_programs(config_files[0])[0]
+
+        # iterate over all compounds
+        for chunk in iterator_l:
+            input_files_l = map(lambda x: os.path.abspath(x), list(chunk.file_origin))
+
+            input_files_l_indices = list(chunk['index'])
+            ligand_ids = list(chunk['ligID'])
+    
+            for jdx, ligid in enumerate(ligand_ids):
+                ligand_jdx_abs += 1
+
+                # if VS level is 0 or 1, create a subdirectory per (ligand, target) pair
+                if level in [0, 1] or level is None:
+                    subdir = workdir
+                    for layer_idx in range(nlayers, 0, -1):
+                        subdir += utils.get_subdir_from_ligid(ligid, layer_idx=layer_idx)
+    
+                    for idx, targetid in enumerate(targetids):
+                        workdir = subdir + '/' + ligid + '/' + targetid
+                        if idx == 0:
+                            input_file_l_rel = os.path.relpath(input_files_l[jdx], start=workdir)
+    
+                        if ligand_jdx_abs == 1 and idx == 0:
+                            input_files_r_rel = []
+                            for file_r in input_files_r:
+                                input_files_r_rel.append(os.path.relpath(file_r, start=workdir))
+    
+                            config_files_rel = []
+                            for file_c in config_files:
+                                config_files_rel.append(os.path.relpath(file_c, start=workdir))
+
+                    os.makedirs(workdir) # make directory
+                    script = ""
+                    if level == 0:
+                        filename = workdir + "/" + runscript_suffix + "." + self.scheduler
+                        script += queuing.make_header(self.scheduler_options, self.scheduler)
+                    else:
+                        filename = workdir + "/" + runscript_suffix + ".sh"
+                        script += '#!/bin/bash'
+                    script += "\n\n" + utils.get_babel_command(input_file_l_rel, index=input_files_l_indices[jdx])
+                    script += "\ncp %s config.ini"%config_files_rel[idx] # copy to avoid memory problems
+                    script += "\ncp %s target.pdb"%input_files_r_rel[idx] # copy to avoid memory problems
+                    script += "\nrundbx -f config.ini -l ligand.mol2 -r target.pdb"
+                    script += "\nrm -rf config.ini ligand.mol2 target.pdb"
+
+                    with open(filename, 'w') as ff:
+                        ff.write(script)
+
+                    if level == 1:
+                        # update workdirs for scripts
+                        workdirs += ' ' + subdir + '/' + ligid + '/target*'
+
+                        # check if job script should be written
+                        if ligand_jdx_abs%nligands_per_job == 0 or ligand_jdx_abs == nligands:
+                            jobidx += 1
+                            script = queuing.make_header(self.scheduler_options, self.scheduler, \
+jobname="vs%s"%jobidx, output=scheduler+"-vs-%s.out"%jobidx, error=scheduler+"-vs-%s.err"%jobidx)
+                            script += """\ndirs=`echo %(workdirs)s`
+curdir=`pwd`
+for dir in $dirs; do
+  cd $dir
+  bash %(runscript_suffix)s.sh
+  cd $curdir
+done\n"""%locals()
+                            with open(submit_dir+'/run_vs_%i.'%jobidx+self.scheduler, 'w') as ff:
+                                ff.write(script)
+                            workdirs = ""
+ 
+                elif level == 2:
+                    for idx, targetid in enumerate(targetids):
+                        if idx == 0:
+                            input_file_l_rel = os.path.relpath(input_files_l[jdx], start='vs/job')
+  
+                        if ligand_jdx_abs == 1 and idx == 0:
+                            input_files_r_rel = []
+                            for file_r in input_files_r:
+                                input_files_r_rel.append(os.path.relpath(file_r, start='vs/job'))
+  
+                            config_files_rel = []
+                            for file_c in config_files:
+                                config_files_rel.append(os.path.relpath(file_c, start='vs/job'))
+  
+                        babel_cmd = utils.get_babel_command(input_file_l_rel, index=input_files_l_indices[jdx])
+                        cf = config_files_rel[idx]
+                        rf = input_files_r_rel[idx]
+                        script += """\n\n%(babel_cmd)s
+score=
+if [ -f ligand.mol2 ]; then
+  cp %(cf)s config.ini
+  cp %(rf)s target.pdb
+  rundbx -f config.ini -l ligand.mol2 -r target.pdb
+  if [ -f %(program)s/score.out ]; then
+    score=`cat %(program)s/score.out`
+  fi
+fi
+echo "%(ligid)s,%(targetid)s,$score" >> scores.dat
+rm -rf config.ini ligand.mol2 target.pdb %(program)s poses
+"""%locals()
+                    # check if job script should be written
+                    if ligand_jdx_abs%nligands_per_job == 0 or ligand_jdx_abs == nligands:
+                        jobidx += 1
+                        jobid = '0'*(len(str(njobs))-len((str(jobidx)))) + str(jobidx)
+  
+                        jobdir = workdir + "/job%s"%jobid
+                        os.mkdir(jobdir)
+  
+                        script = '\n\necho "ligID,targetID,%(program)s" > scores.dat'%locals() + script
+                        script = queuing.make_header(self.scheduler_options, self.scheduler, jobname="vs%s"%jobidx, \
+                                output=self.scheduler+"-vs-%s.out"%jobidx, error=self.scheduler+"-vs-%s.err"%jobidx) + script
+                        with open(jobdir+'/run.'+self.scheduler, 'w') as ff:
+                            ff.write(script)
+                        script = ""
+
+        # create directory which contains scripts to be submitted
+        submit_dir = 'to_submit_' + workdir
+        create_directory(submit_dir, overwrite=True)
+
+        self.write_submit_all_script(submit_dir+'/submit_all.sh', workdir, level, nlayers)
+
+    def write_submit_all_script(self, script, workdir, level, nlayers):
+
+        scheduler = self.scheduler
+        exe = self.exe
+        if level == 0:
+            dirs = workdir
+            for idx in range(nlayers):
+                dirs += '/lig*'
+            dirs += '/lig*/target*'
+            line_iterate = "for dir in %s; do"%dirs
+            # write script to submit all jobs
+            script_all = """#!/bin/bash
+curdir=`pwd`
+%(line_iterate)s
+  cd $dir
+  %(exe)s %(runscript_suffix)s.%(scheduler)s
+  cd $curdir
+done\n"""%locals()
+            with open(script, 'w') as ff:
+                ff.write(script_all)
+        
+        elif level == 1:
+            with open(script, 'w') as ff:
+                ff.write("""#!/bin/bash
+for file in %(scriptdir)s/run_vs_*.%(scheduler)s; do
+  %(exe)s $file
+done"""%locals())
+
+        elif level == 2:
+            with open(script, 'w') as ff:
+                ff.write("""#!/bin/bash
+curdir=`pwd`
+for dir in %(workdir)s/job*; do
+  cd $dir
+  %(exe)s run.%(scheduler)s
+  cd $curdir
+done"""%locals())
+
+    def write_logfile(self, filename, csvfile_l, csvfile_r, csvfile_s, config_file, level):
+
+        with open(filename, 'w') as logf:
+            script = """# Virtual Screening (VS) logfile
+
+# configuration file: %(config_file)s
+# ligand file: %(csvfile_l)s
+# receptor file: %(csvfile_r)s
+# sites file: %(csvfile_s)s
+# screening level: %(level)s"""%locals()
+            logf.write(script)
+
+    def prepare_scripts(self, workdir, csvfile_l, csvfile_r, csvfile_s, config_file, level, nligands_per_job=None):
+        """Prepare all the scripts needed for VS"""
+    
+        # extract information about targets (file locations, IDs)
+        input_files_r, targetids = get_targets_info(csvfile_r)
+    
+        # prepare config files
+        check_config_file(config_file, level) # check provided model of config file
+        config_files = build_config_files_for_vs(config_file, targetids, csvfile_s)
+    
+        # get csvfile iterator for ligands (needed when dealing with many compounds)
+        nligands = get_number_of_ligands(csvfile_l)
+        iterator_l = get_ligands_iterator(csvfile_l, chunksize=10000)
+
+        if level: 
+            # write scripts
+            create_directory(workdir, overwrite=True)
+            self.write_job_scripts(workdir, iterator_l, nligands, input_files_r, targetids, config_files, level, nligands_per_job=nligands_per_job)
+
+    def set_scheduler(self, args, level):
+        self.scheduler = None
+        for sch in queuing.known_schedulers:
+            args_dict = vars(args)
+            if args_dict[sch+'_options'] is not None:
+                self.scheduler = sch
+                self.exe = queuing.exes[sch]
+                self.scheduler_options = queuing.check_scheduler_options(args_dict[sch+'_options'], self.scheduler)
+
+        if self.scheduler is None:
+            self.exe = None
+            self.scheduler_options = None
+            if level:
+                sys.exit('Info about the scheduler should be provided when level option is specified!')
+
+    def create_arg_parser(self):
+        parser = argparse.ArgumentParser(description="Build directories and config files for Virtual Screening (4th stage)")
+        
+        parser.add_argument('-l',
+            type=str,
+            dest='csvfile_l',
+            metavar='FILE',
+            default='compounds.csv',
+            help='ligand file: .csv (default: compounds.csv)')
+        
+        parser.add_argument('-r',
+            type=str,
+            dest='csvfile_r',
+            metavar='FILE',
+            default='targets.csv',
+            help = 'target file(s): .csv (default: targets.csv)')
+        
+        parser.add_argument('-f',
+            type=str,
+            dest='config_file',
+            metavar='FILE',
+            default='config.ini',
+            help='config file: .ini')
+        
+        parser.add_argument('-level',
+            dest='vs_level',
+            type=int,
+            metavar='INT',
+            choices=range(3),
+            help='level of screening considered. 0: few compounds; 1: intermediate number of compounds, 2: large number of compounds')
+        
+        parser.add_argument('-nligands-per-job',
+            dest='nligands_per_job',
+            type=int,
+            metavar='INT',
+            help='number of ligands to be run for every submitted job (should be used with VS level 1 or 2))')
+
+        parser.add_argument('-s',
+            type=str,
+            dest='csvfile_s',
+            metavar='FILE',
+            default='sites.csv',
+            help = 'sites file(s): .csv (default: sites.csv)')
+
+        parser.add_argument('-w',
+            dest='workdir',
+            type=str,
+            default='vs',
+            metavar='DIRECTORY NAME',
+            help='name of directory created for virtual screening')
+        
+        group = parser.add_mutually_exclusive_group(required=False)
+        for sch in queuing.known_schedulers:
+            group.add_argument('-%s'%sch,
+                dest='%s_options'%sch,
+                type=str,
+                metavar='OPTIONS',
+                help='Options for %s'%queuing.known_schedulers[sch])
+        return parser
+
+    def run(self):
+        parser = self.create_arg_parser()
+        args = parser.parse_args()
+
+        if args.vs_level in [1, 2] and not args.nligands_per_job:
+            sys.exit('-nligands-per-job option (number of ligands per job) is required when VS level is 1 or 2!')
+
+        self.set_scheduler(args, args.vs_level)
+        self.prepare_scripts(args.workdir, args.csvfile_l, args.csvfile_r, args.csvfile_s, args.config_file, args.vs_level, \
+nligands_per_job=args.nligands_per_job)
+
+        # write .log file
+        self.write_logfile("config_%s.log"%workdir, args.workdir, args.csvfile_l, args.csvfile_r, args.csvfile_s, \
+args.config_file, args.level)
+
+class CheckVS(PrepareVS):
+
+    def create_arg_parser(self):
+        #TODO: add the possibilty to prepare scripts for torque and ll
+        parser = argparse.ArgumentParser(description="Check VS and possibly rebuild folders for unfinished ligands!")
+        
+        parser.add_argument('-log',
+            type=str,
+            dest='logfile',
+            metavar='FILE',
+            default='config_vs.log',
+            help='logfile containing info about screening!')
+
+        parser.add_argument('-vsdir',
+            type=str,
+            dest='vsdirs',
+            metavar='FILE',
+            nargs='+',
+            default=['vs'],
+            help='Previous VS directories where to extract results!')
+
+        parser.add_argument('-resub',
+            dest='resubmit',
+            action='store_true',
+            default=False,
+            help='Resubmit jobs')
+
+        # options for resubmission of not yet done compounds
+        parser.add_argument('-nligands-per-job',
+            dest='nligands_per_job',
+            type=int,
+            metavar='INT',
+            help='Number of ligands to be run for every submitted job (used for VS levels 1 and 2))')
+        
+        group = parser.add_mutually_exclusive_group(required=False)
+        for sch in queuing.known_schedulers:
+            group.add_argument('-%s'%sch,
+                dest='%s_options'%sch,
+                type=str,
+                metavar='OPTIONS',
+                default=None,
+                help='Options for %s'%queuing.known_schedulers[sch])
+
+        parser.add_argument('-w',
+            dest='workdir',
+            type=str,
+            default='vs_resub',
+            metavar='DIRECTORY NAME',
+            help='name of directory created for virtual screening')
+
+        return parser
+
+    def extract_from_logfile(self, filename, ft_name, ftype=str):
+        """Extract parameter from log file"""
+        with open(filename, 'r') as logf:
+            for line in logf:
+                line_st = line.strip()
+                if line_st.startswith("#"):
+                    line_st_sp = line_st[1:].strip().split(":")
+                    if len(line_st_sp) == 2:
+                        ft = line_st_sp[0].strip()
+                        value = line_st_sp[1].strip()
+                        if ft == ft_name:
+                            return ftype(value)
+        sys.exit("Parameter matching description '%s' not found"%ft_name)
+
+    def check_vs(self, vsdirs, csvfile_l, level):
+        results_dir = 'results'
+        shutil.rmtree(results_dir, ignore_errors=True)
+        os.mkdir(results_dir)
+        
+        if level == 2:
+            results_csv = "%s/scores.csv"%results_dir
+            score_files = ['%s/job*/scores.dat'%vsdir for vsdir in vsdirs]
+            score_files = ' '.join(score_files)
+            # create array with files
+            merge_csvfiles_lines = """files=%(score_files)s
+first=`echo $files | head -n1 | awk '{print $1;}'`
+head -n 1 $first > %(results_csv)s
+for f in $files; do
+  sed 1d $f >> %(results_csv)s
+done
+head -1 %(results_csv)s > tmp.csv
+sed 1d %(results_csv)s | sort >> tmp.csv
+mv tmp.csv %(results_csv)s\n"""%locals()
+            subprocess.check_call(merge_csvfiles_lines, shell=True)
+        
+            # extract results on ligands
+            results = dd.read_csv(results_csv)
+            results = results.drop_duplicates(subset='ligID', keep="first")
+        
+            # extract info about ligands from csvfile
+            info_l = dd.read_csv(csvfile_l)
+            nligands = len(info_l)
+
+            # Print info on ligands
+            print "Percentage of ligand done: %.2f%% (of %i)"%(len(results)*100./nligands, nligands)
+            print "%i compounds remaining!"%(nligands-len(results))
+
+            # determine undone ligands from difference
+            merged = dd.merge(info_l, results, on='ligID', how='left', indicator=True)
+            undone_ligands = info_l[merged['_merge']=='left_only']
+
+            undone_csv_all = "%s/undone-*.csv"%results_dir
+            undone_csv = "%s/undone.csv"%results_dir
+            undone_ligands.to_csv(undone_csv_all, index=False)
+
+            # create array with files
+            merge_csvfiles_lines = """files=%(undone_csv_all)s
+first=`echo $files | head -n1 | awk '{print $1;}'`
+head -n 1 $first > %(undone_csv)s
+for f in $files; do
+  sed 1d $f >> %(undone_csv)s
+done
+rm -rf %(undone_csv_all)s"""%locals()
+            subprocess.check_call(merge_csvfiles_lines, shell=True)
+            return undone_csv
+
+    def run(self):
+        parser = self.create_arg_parser()
+        args = parser.parse_args()
+
+        logfile = args.logfile
+        # load info about receptor and ligand files
+        csvfile_l = self.extract_from_logfile(logfile, 'ligand file')
+        csvfile_r = self.extract_from_logfile(logfile, 'receptor file')
+
+        # load info about config file
+        config_file = self.extract_from_logfile(logfile, 'configuration file')
+        csvfile_s = self.extract_from_logfile(logfile, 'sites file')
+
+        # VS level
+        level = self.extract_from_logfile(logfile, 'screening level', ftype=int) 
+        undone_csv = self.check_vs(args.vsdirs, csvfile_l, level)
+        if args.resubmit:
+            if level in [1, 2] and not args.nligands_per_job:
+                sys.exit('-nligands-per-job option (number of ligands per job) is required when VS level is 1 or 2!')
+            self.set_scheduler(args, level)
+
+            # set default workdir directory
+            self.prepare_scripts(args.workdir, undone_csv, csvfile_r, csvfile_s, config_file, level, nligands_per_job=args.nligands_per_job)
