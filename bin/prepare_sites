@@ -98,7 +98,7 @@ else:
 
 curdir = os.getcwd()
 info = {}
-features = ['target', 'center', 'size', 'site']
+features = ['targetID', 'center', 'size', 'site']
 if args.sitefinder:
     features += ['plb']
 for ft in features:
@@ -106,7 +106,7 @@ for ft in features:
 
 if args.blankcsv:
     # create a blan .csv file with targets ids
-    blank_info = {'target': targetids, 'center': ['x, y, z']*ntargets, 'size': ['x, y, z']*ntargets, 'site': [1]*ntargets}
+    blank_info = {'targetID': targetids, 'center': ['x, y, z']*ntargets, 'size': ['x, y, z']*ntargets, 'site': [1]*ntargets}
     df = pd.DataFrame(blank_info)
     df[features].to_csv(args.csvfile, index=False)
     sys.exit(0)
@@ -177,7 +177,7 @@ for jdx, file_r in enumerate(input_files_r):
 
         cog = utils.center_of_geometry(coords)
         center = ', '.join(['%.2f'%float(x) for x in cog])
-        info['target'].append(targetid)
+        info['targetID'].append(targetid)
         info['center'].append(center)
         info['size'].append(', '.join(['%.1f'%args.minsize for kdx in range(3)]))
         info['site'].append('1')

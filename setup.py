@@ -12,7 +12,7 @@ if not (sys.version_info[0] == 2 and sys.version_info[1] >= 6):
 setuptools.setup(name='dockbox_vs',
     version='1.1',
     packages=['dockbox_vs'],
-    scripts=['bin/prepare_compounds', 'bin/prepare_targets', 'bin/prepare_sites', 'bin/prepare_vs', 'bin/check_vs'],
+    scripts=['bin/prepare_compounds', 'bin/prepare_targets', 'bin/prepare_sites', 'bin/prepare_vs', 'bin/check_vs', 'bin/split_mol2files'],
     install_requires=['dockbox'],
     description='Plug-in for DockBox package',
     long_description=open('README.rst').read(),

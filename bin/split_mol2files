@@ -1,0 +1,61 @@
+#!/usr/bin/env python
+import os
+import argparse
+
+parser = argparse.ArgumentParser(description="Split mol2file to multiple files")
+
+parser.add_argument('-i',
+    dest='input_file',
+    required=True,
+    help="input mol2file")
+
+parser.add_argument('-ix',
+    dest='index',
+    type=int,
+    default=None,
+    help="index to be extracted")
+
+parser.add_argument('-o',
+    dest='output_file',
+    required=True,
+    help="output mol2file")
+
+args = parser.parse_args()
+
+def split_mol2file(output_file, input_file, index=None):
+    if index is None:
+        basename, ext = os.path.splitext(output_file)
+    elif isinstance(index, int):
+        index = [index]
+
+    jdx = 0
+    idxmol = 0
+    save_structure = False
+    with open(input_file, 'r') as mol2f:
+        for line in mol2f:
+            if line.startswith("@<TRIPOS>MOLECULE"):
+                idxmol += 1
+                if index is None:
+                    filename = basename + str(idxmol) + ext
+                    save_structure = True
+                elif idxmol in index and len(index) == 1:
+                    filename = output_file
+                    save_structure = True
+                elif idxmol in index and len(index) > 1:
+                    jdx += 1
+                    filename = basename + str(jdx) + ext   
+                    save_structure = True
+                elif save_structure:
+                    ff.close()
+                    filename = None
+                    save_structure = False
+                if save_structure:
+                    ff = open(filename, 'w')
+                    ff.write(line)
+            elif save_structure:
+                ff.write(line)
+    if save_structure:
+        ff.close()
+    return
+
+split_mol2file(args.output_file, args.input_file, index=args.index)

@@ -1,4 +1,3 @@
-
 known_schedulers = {'sge': 'Sun Grid Engine', 'slurm': 'Slurm Workload Manager'}
 exes = {'sge': 'qsub', 'slurm': 'sbatch'}
 
@@ -14,7 +13,8 @@ default_options = {'sge': {'S': '/bin/bash',
 'cpus-per-task': '1',
 'nodes': '1'}}
 
-mandatory_options = {'sge': ['q'], 'slurm': ['partition', 'time']}
+#mandatory_options = {'sge': ['q'], 'slurm': ['partition', 'time']}
+mandatory_options = {'sge': [], 'slurm': ['partition', 'time']}
 equivalent_options = {'slurm': {'p': 'partition', 't': 'time', 'j': 'job-name', 'x': 'exclude'}}
 
 def slurm_to_seconds(string):

@@ -90,7 +90,7 @@ else:
     shift = 0 # when not updating, the shift is zero
 
 # features to be stored about compounds
-features = ['ligID', 'file_origin', 'index', 'name']
+features = ['ligID', 'file_origin', 'index_file', 'name']
 def initialize_info():
     info = {}
     for ft in features:
@@ -150,8 +150,8 @@ for ldx, file_l in enumerate(input_files_l):
             info = checkpoint(kdx, nsave, args.csvfile, info, append=args.append)
             # store info about ligand
             info['ligID'].append('lig' + (nid_digits-len(str(kdx)))*'0' + str(kdx))
-            info['file_origin'].append(os.path.relpath(file_l))
-            info['index'].append(jdx+1)
+            info['file_origin'].append(file_l)
+            info['index_file'].append(jdx+1)
             info['name'].append(get_compound_name(ff, ext)) # get compound name
     shift = kdx
 

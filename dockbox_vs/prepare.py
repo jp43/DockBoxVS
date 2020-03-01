@@ -81,7 +81,7 @@ def add_new_site_information(config_file_content, targetid, df_sites):
 
     rows = df_sites[df_sites['targetID']==targetid]
     if rows.empty:
-        sys.exit("No information regarding the site of target %s in .csv file"%label_r)
+        sys.exit("No information regarding the site of target %s in .csv file"%targetid)
     nsites = len(rows)
 
     new_content = []
@@ -103,6 +103,18 @@ def add_new_site_information(config_file_content, targetid, df_sites):
             new_content.append('\n[SITE%s]\n'%str(int(row['site'])))
             new_content.append("center = %s\n"%(row['center']))
             new_content.append("boxsize = %s\n"%(row['size']))
+
+    new_content = add_target_information(new_content, targetid)
+    return new_content
+
+def add_target_information(content, targetid):
+    new_content = []
+    for line in content:
+        newline = line.replace("$targetid", targetid)
+        newline = newline.replace("${targetid}", targetid)
+        newline = newline.replace("${target_id}", targetid)
+        newline = newline.replace("$target_id", targetid)
+        new_content.append(newline)
     return new_content
 
 def check_config_file(model, level):
@@ -162,6 +174,12 @@ def get_number_of_ligands(csvfile):
     print "Number of compounds found: %s"%nligands
     return nligands
 
+def get_last_ligid(csvfile):
+    ligid = subprocess.check_output("tail -n 1 %s"%csvfile, shell=True).split(',')[0]
+    if not ligid.startswith("lig"):
+       sys.exit("First column of csvfile %s does not correspond to ligand ID!")
+    return ligid
+
 def create_directory(dirname, overwrite=False):
     if overwrite:
         shutil.rmtree(dirname, ignore_errors=True)
@@ -172,7 +190,7 @@ class PrepareVS(object):
     def __init__(self):
         self.nfolders_per_layer = 1000 # number of folders per layer of subdirectory (level 0 or 1)
 
-    def initalize_lvl1(self):
+    def initalize_lvl1(self, nligands):
         nlayers = 0 # initial number of layers
         nfolders_layer = nligands
 
@@ -193,23 +211,27 @@ class PrepareVS(object):
             njobs += 1
         return njobs, 0, ""
 
-    def write_job_scripts(self, workdir, iterator_l, nligands, input_files_r, targetids, config_files, level, nligands_per_job=None):
+    def write_job_scripts(self, vsdir, iterator_l, nligands, input_files_r, targetids, config_files, level, nligands_per_job=None):
         """Write all the scripts needed"""
         # initialize all variables
         jobidx = 0
         ligand_jdx_abs = 0
         if level in [0, 1]:
-            nlayers, workdirs = self.initalize_lvl1()
+            nlayers, workdirs = self.initalize_lvl1(nligands)
 
         elif level == 2:
             njobs, nlayers, script = self.initalize_lvl2(nligands, nligands_per_job)
             program = get_programs(config_files[0])[0]
 
+        # create directory which contains scripts to be submitted
+        submit_dir = 'to_submit_' + vsdir
+        create_directory(submit_dir, overwrite=True)
+
         # iterate over all compounds
         for chunk in iterator_l:
             input_files_l = map(lambda x: os.path.abspath(x), list(chunk.file_origin))
 
-            input_files_l_indices = list(chunk['index'])
+            input_files_l_indices = list(chunk['index_file'])
             ligand_ids = list(chunk['ligID'])
     
             for jdx, ligid in enumerate(ligand_ids):
@@ -217,33 +239,32 @@ class PrepareVS(object):
 
                 # if VS level is 0 or 1, create a subdirectory per (ligand, target) pair
                 if level in [0, 1] or level is None:
-                    subdir = workdir
+                    subdir = vsdir
                     for layer_idx in range(nlayers, 0, -1):
-                        subdir += utils.get_subdir_from_ligid(ligid, layer_idx=layer_idx)
-    
+                        subdir += utils.get_subdir_from_ligid(ligid, nligands, self.nfolders_per_layer, layer_idx=layer_idx)
                     for idx, targetid in enumerate(targetids):
                         workdir = subdir + '/' + ligid + '/' + targetid
                         if idx == 0:
-                            input_file_l_rel = os.path.relpath(input_files_l[jdx], start=workdir)
+                            input_file_l_rel = os.path.abspath(input_files_l[jdx])
     
                         if ligand_jdx_abs == 1 and idx == 0:
                             input_files_r_rel = []
                             for file_r in input_files_r:
-                                input_files_r_rel.append(os.path.relpath(file_r, start=workdir))
+                                input_files_r_rel.append(os.path.abspath(file_r))
     
                             config_files_rel = []
                             for file_c in config_files:
-                                config_files_rel.append(os.path.relpath(file_c, start=workdir))
+                                config_files_rel.append(os.path.abspath(file_c))
 
                     os.makedirs(workdir) # make directory
                     script = ""
                     if level == 0:
-                        filename = workdir + "/" + runscript_suffix + "." + self.scheduler
+                        filename = workdir + "/run." + self.scheduler
                         script += queuing.make_header(self.scheduler_options, self.scheduler)
                     else:
-                        filename = workdir + "/" + runscript_suffix + ".sh"
+                        filename = workdir + "/run.sh"
                         script += '#!/bin/bash'
-                    script += "\n\n" + utils.get_babel_command(input_file_l_rel, index=input_files_l_indices[jdx])
+                    script += "\n\nsplit_mol2files -i %s -o ligand.mol2 -ix %s"%(input_file_l_rel, input_files_l_indices[jdx])
                     script += "\ncp %s config.ini"%config_files_rel[idx] # copy to avoid memory problems
                     script += "\ncp %s target.pdb"%input_files_r_rel[idx] # copy to avoid memory problems
                     script += "\nrundbx -f config.ini -l ligand.mol2 -r target.pdb"
@@ -255,17 +276,15 @@ class PrepareVS(object):
                     if level == 1:
                         # update workdirs for scripts
                         workdirs += ' ' + subdir + '/' + ligid + '/target*'
-
                         # check if job script should be written
                         if ligand_jdx_abs%nligands_per_job == 0 or ligand_jdx_abs == nligands:
                             jobidx += 1
-                            script = queuing.make_header(self.scheduler_options, self.scheduler, \
-jobname="vs%s"%jobidx, output=scheduler+"-vs-%s.out"%jobidx, error=scheduler+"-vs-%s.err"%jobidx)
+                            script = queuing.make_header(self.scheduler_options, self.scheduler, jobname="vs%s"%jobidx, output="/dev/null", error="/dev/null")
                             script += """\ndirs=`echo %(workdirs)s`
 curdir=`pwd`
 for dir in $dirs; do
   cd $dir
-  bash %(runscript_suffix)s.sh
+  bash run.sh
   cd $curdir
 done\n"""%locals()
                             with open(submit_dir+'/run_vs_%i.'%jobidx+self.scheduler, 'w') as ff:
@@ -275,21 +294,21 @@ done\n"""%locals()
                 elif level == 2:
                     for idx, targetid in enumerate(targetids):
                         if idx == 0:
-                            input_file_l_rel = os.path.relpath(input_files_l[jdx], start='vs/job')
+                            input_file_l_rel = os.path.abspath(input_files_l[jdx])
   
                         if ligand_jdx_abs == 1 and idx == 0:
                             input_files_r_rel = []
                             for file_r in input_files_r:
-                                input_files_r_rel.append(os.path.relpath(file_r, start='vs/job'))
+                                input_files_r_rel.append(os.path.abspath(file_r))
   
                             config_files_rel = []
                             for file_c in config_files:
-                                config_files_rel.append(os.path.relpath(file_c, start='vs/job'))
+                                config_files_rel.append(os.path.abspath(file_c))
   
-                        babel_cmd = utils.get_babel_command(input_file_l_rel, index=input_files_l_indices[jdx])
+                        mol2cmd = "split_mol2files -i %s -o ligand.mol2 -ix %s"%(input_file_l_rel, input_files_l_indices[jdx])
                         cf = config_files_rel[idx]
                         rf = input_files_r_rel[idx]
-                        script += """\n\n%(babel_cmd)s
+                        script += """\n\n%(mol2cmd)s
 score=
 if [ -f ligand.mol2 ]; then
   cp %(cf)s config.ini
@@ -297,6 +316,9 @@ if [ -f ligand.mol2 ]; then
   rundbx -f config.ini -l ligand.mol2 -r target.pdb
   if [ -f %(program)s/score.out ]; then
     score=`cat %(program)s/score.out`
+    if [ -f poses/lig-1.mol2 ]; then
+      cat poses/lig-1.mol2 >> poses.mol2
+    fi 
   fi
 fi
 echo "%(ligid)s,%(targetid)s,$score" >> scores.dat
@@ -307,7 +329,7 @@ rm -rf config.ini ligand.mol2 target.pdb %(program)s poses
                         jobidx += 1
                         jobid = '0'*(len(str(njobs))-len((str(jobidx)))) + str(jobidx)
   
-                        jobdir = workdir + "/job%s"%jobid
+                        jobdir = vsdir + "/job%s"%jobid
                         os.mkdir(jobdir)
   
                         script = '\n\necho "ligID,targetID,%(program)s" > scores.dat'%locals() + script
@@ -317,18 +339,15 @@ rm -rf config.ini ligand.mol2 target.pdb %(program)s poses
                             ff.write(script)
                         script = ""
 
-        # create directory which contains scripts to be submitted
-        submit_dir = 'to_submit_' + workdir
-        create_directory(submit_dir, overwrite=True)
+        self.write_submit_all_script(submit_dir, vsdir, level, nlayers)
 
-        self.write_submit_all_script(submit_dir+'/submit_all.sh', workdir, level, nlayers)
+    def write_submit_all_script(self, submit_dir, vsdir, level, nlayers):
 
-    def write_submit_all_script(self, script, workdir, level, nlayers):
-
+        script = submit_dir + '/submit_all.sh'
         scheduler = self.scheduler
         exe = self.exe
         if level == 0:
-            dirs = workdir
+            dirs = vsdir
             for idx in range(nlayers):
                 dirs += '/lig*'
             dirs += '/lig*/target*'
@@ -338,7 +357,7 @@ rm -rf config.ini ligand.mol2 target.pdb %(program)s poses
 curdir=`pwd`
 %(line_iterate)s
   cd $dir
-  %(exe)s %(runscript_suffix)s.%(scheduler)s
+  %(exe)s run.%(scheduler)s
   cd $curdir
 done\n"""%locals()
             with open(script, 'w') as ff:
@@ -347,7 +366,7 @@ done\n"""%locals()
         elif level == 1:
             with open(script, 'w') as ff:
                 ff.write("""#!/bin/bash
-for file in %(scriptdir)s/run_vs_*.%(scheduler)s; do
+for file in %(submit_dir)s/run_vs_*.%(scheduler)s; do
   %(exe)s $file
 done"""%locals())
 
@@ -355,7 +374,7 @@ done"""%locals())
             with open(script, 'w') as ff:
                 ff.write("""#!/bin/bash
 curdir=`pwd`
-for dir in %(workdir)s/job*; do
+for dir in %(vsdir)s/job*; do
   cd $dir
   %(exe)s run.%(scheduler)s
   cd $curdir
@@ -375,7 +394,6 @@ done"""%locals())
 
     def prepare_scripts(self, workdir, csvfile_l, csvfile_r, csvfile_s, config_file, level, nligands_per_job=None):
         """Prepare all the scripts needed for VS"""
-    
         # extract information about targets (file locations, IDs)
         input_files_r, targetids = get_targets_info(csvfile_r)
     
@@ -384,10 +402,10 @@ done"""%locals())
         config_files = build_config_files_for_vs(config_file, targetids, csvfile_s)
     
         # get csvfile iterator for ligands (needed when dealing with many compounds)
-        nligands = get_number_of_ligands(csvfile_l)
-        iterator_l = get_ligands_iterator(csvfile_l, chunksize=10000)
+        nligands = int(get_last_ligid(csvfile_l)[3:])
 
-        if level: 
+        iterator_l = get_ligands_iterator(csvfile_l, chunksize=10000)
+        if level is not None: 
             # write scripts
             create_directory(workdir, overwrite=True)
             self.write_job_scripts(workdir, iterator_l, nligands, input_files_r, targetids, config_files, level, nligands_per_job=nligands_per_job)
@@ -404,7 +422,7 @@ done"""%locals())
         if self.scheduler is None:
             self.exe = None
             self.scheduler_options = None
-            if level:
+            if level is not None:
                 sys.exit('Info about the scheduler should be provided when level option is specified!')
 
     def create_arg_parser(self):
@@ -452,7 +470,7 @@ done"""%locals())
             help = 'sites file(s): .csv (default: sites.csv)')
 
         parser.add_argument('-w',
-            dest='workdir',
+            dest='vsdir',
             type=str,
             default='vs',
             metavar='DIRECTORY NAME',
@@ -475,12 +493,11 @@ done"""%locals())
             sys.exit('-nligands-per-job option (number of ligands per job) is required when VS level is 1 or 2!')
 
         self.set_scheduler(args, args.vs_level)
-        self.prepare_scripts(args.workdir, args.csvfile_l, args.csvfile_r, args.csvfile_s, args.config_file, args.vs_level, \
+        self.prepare_scripts(args.vsdir, args.csvfile_l, args.csvfile_r, args.csvfile_s, args.config_file, args.vs_level, \
 nligands_per_job=args.nligands_per_job)
 
         # write .log file
-        self.write_logfile("config_%s.log"%workdir, args.workdir, args.csvfile_l, args.csvfile_r, args.csvfile_s, \
-args.config_file, args.level)
+        self.write_logfile("config_%s.log"%args.vsdir, args.csvfile_l, args.csvfile_r, args.csvfile_s, args.config_file, args.vs_level)
 
 class CheckVS(PrepareVS):
 
@@ -495,6 +512,19 @@ class CheckVS(PrepareVS):
             default='config_vs.log',
             help='logfile containing info about screening!')
 
+        parser.add_argument('-ntops',
+            dest='ntops',
+            type=int,
+            metavar='INT',
+            default=1000,
+            help='Number of top hits saved!')
+
+        parser.add_argument('-resub',
+            dest='resubmit',
+            action='store_true',
+            default=False,
+            help='Resubmit jobs')
+
         parser.add_argument('-vsdir',
             type=str,
             dest='vsdirs',
@@ -502,12 +532,6 @@ class CheckVS(PrepareVS):
             nargs='+',
             default=['vs'],
             help='Previous VS directories where to extract results!')
-
-        parser.add_argument('-resub',
-            dest='resubmit',
-            action='store_true',
-            default=False,
-            help='Resubmit jobs')
 
         # options for resubmission of not yet done compounds
         parser.add_argument('-nligands-per-job',
@@ -548,15 +572,19 @@ class CheckVS(PrepareVS):
                             return ftype(value)
         sys.exit("Parameter matching description '%s' not found"%ft_name)
 
-    def check_vs(self, vsdirs, csvfile_l, level):
+    def extract_results(self, vsdirs, csvfile_l, config_file, level, ntops=1000):
+        """Extract results from previous screening simulations"""
         results_dir = 'results'
         shutil.rmtree(results_dir, ignore_errors=True)
         os.mkdir(results_dir)
         
         if level == 2:
+            programs = get_programs(config_file, is_rescoring=False)
+
             results_csv = "%s/scores.csv"%results_dir
             score_files = ['%s/job*/scores.dat'%vsdir for vsdir in vsdirs]
             score_files = ' '.join(score_files)
+
             # create array with files
             merge_csvfiles_lines = """files=%(score_files)s
 first=`echo $files | head -n1 | awk '{print $1;}'`
@@ -568,36 +596,78 @@ head -1 %(results_csv)s > tmp.csv
 sed 1d %(results_csv)s | sort >> tmp.csv
 mv tmp.csv %(results_csv)s\n"""%locals()
             subprocess.check_call(merge_csvfiles_lines, shell=True)
-        
-            # extract results on ligands
-            results = dd.read_csv(results_csv)
-            results = results.drop_duplicates(subset='ligID', keep="first")
-        
             # extract info about ligands from csvfile
-            info_l = dd.read_csv(csvfile_l)
+            info_l = pd.read_csv(csvfile_l)
             nligands = len(info_l)
 
-            # Print info on ligands
-            print "Percentage of ligand done: %.2f%% (of %i)"%(len(results)*100./nligands, nligands)
-            print "%i compounds remaining!"%(nligands-len(results))
+            # extract results on ligands
+            df = pd.read_csv(results_csv)
+            nligands_done = len(df)
 
-            # determine undone ligands from difference
-            merged = dd.merge(info_l, results, on='ligID', how='left', indicator=True)
+            # Print info on ligands
+            print "Percentage of ligands done: %.2f%% (of %i)"%(nligands_done*100./nligands, nligands)
+            print "%i compounds remaining!"%(nligands-nligands_done)
+
+            ntops = min(ntops, nligands_done)
+            df_groupby = df.groupby('ligID')
+
+            for prgm in programs:
+                df_best_score = df_groupby[prgm].idxmin()
+                df_best_score_na = df_best_score.isnull()
+
+                df_failed = pd.DataFrame(df_best_score_na[df_best_score_na].index)
+
+                df_no_failed = df.loc[df_best_score[~df_best_score_na]]
+                df_no_failed = df_no_failed.reset_index(drop=True)
+
+                # save done ligands
+                merged_no_failed = pd.merge(info_l, df_no_failed, on='ligID', how='right')
+                merged_no_failed.to_csv("%s/ligands_%s.csv"%(results_dir,prgm), index=False)
+                merged_no_failed_smallest = merged_no_failed.nsmallest(ntops, prgm)
+
+                # get all the files with poses 
+                filenames = []
+                for vsdir in vsdirs:
+                    filenames.extend(sorted(list(glob('%s/job*/poses.mol2'%vsdir))))
+
+                poses = {}
+                top_ligands = list(merged_no_failed_smallest['name'].values)
+                # collect poses if they exist
+                for mol2file in filenames:
+                    with open(mol2file, 'r') as mol2f:
+                        for line in mol2f:
+                            if line.startswith("@<TRIPOS>MOLECULE"):
+                                name = mol2f.next().strip()
+                                if name in top_ligands:
+                                    poses[name] = []
+                                    poses[name].append(line)
+                                    poses[name].append(name+'\n')
+                                    keep_molecule = True
+                                else:
+                                    keep_molecule = False
+                            elif keep_molecule:
+                                poses[name].append(line)
+
+                is_structure = []
+                with open('%s/poses_%s_top_%i.mol2'%(results_dir, prgm, ntops), 'w') as ff:
+                    for name in top_ligands:
+                        if name in poses:
+                            for line in poses[name]:
+                                ff.write(line)
+                            is_structure.append(True)
+                        else:
+                            is_structure.append(False)
+                merged_no_failed_smallest['structure'] = is_structure
+                merged_no_failed_smallest.to_csv("%s/scores_%s_top_%i.csv"%(results_dir, prgm, ntops), index=False)
+                # save failed compounds
+                merged_failed = pd.merge(info_l, df_failed, on='ligID', how='right')
+                merged_failed.to_csv("%s/ligands_failed_%s.csv"%(results_dir, prgm), index=False)
+
+            merged = pd.merge(info_l, df, on='ligID', how='left', indicator=True)
             undone_ligands = info_l[merged['_merge']=='left_only']
 
-            undone_csv_all = "%s/undone-*.csv"%results_dir
-            undone_csv = "%s/undone.csv"%results_dir
-            undone_ligands.to_csv(undone_csv_all, index=False)
-
-            # create array with files
-            merge_csvfiles_lines = """files=%(undone_csv_all)s
-first=`echo $files | head -n1 | awk '{print $1;}'`
-head -n 1 $first > %(undone_csv)s
-for f in $files; do
-  sed 1d $f >> %(undone_csv)s
-done
-rm -rf %(undone_csv_all)s"""%locals()
-            subprocess.check_call(merge_csvfiles_lines, shell=True)
+            undone_csv = "%s/ligands_undone.csv"%results_dir
+            undone_ligands.to_csv(undone_csv, index=False)
             return undone_csv
 
     def run(self):
@@ -615,11 +685,11 @@ rm -rf %(undone_csv_all)s"""%locals()
 
         # VS level
         level = self.extract_from_logfile(logfile, 'screening level', ftype=int) 
-        undone_csv = self.check_vs(args.vsdirs, csvfile_l, level)
+        undone_csv = self.extract_results(args.vsdirs, csvfile_l, config_file, level, ntops=args.ntops)
         if args.resubmit:
+            # check if nligands-per-job option was set
             if level in [1, 2] and not args.nligands_per_job:
                 sys.exit('-nligands-per-job option (number of ligands per job) is required when VS level is 1 or 2!')
             self.set_scheduler(args, level)
-
             # set default workdir directory
             self.prepare_scripts(args.workdir, undone_csv, csvfile_r, csvfile_s, config_file, level, nligands_per_job=args.nligands_per_job)
