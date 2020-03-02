@@ -7,7 +7,6 @@ import ConfigParser
 
 from glob import glob
 import pandas as pd
-import dask.dataframe as dd
 
 import queuing
 import utils
