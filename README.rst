@@ -32,28 +32,33 @@ docked per job can be controlled with the -nligands-per-job option.
 Each folder contains a single script (slurm, sge) which will run docking sequentially on multiple ligands (on all targets). All docking
 simulations will be run in the same folder. Only the score of the best pose (no rescoring) will be saved
 
-usage: prepare_vs [-h] [-l FILE] [-r FILE] [-f FILE] [-level INT]
+
+:: 
+
+    usage: prepare_vs [-h] [-l FILE] [-r FILE] [-f FILE] [-level INT]
                   [-nligands-per-job INT] [-s FILE] [-w DIRECTORY NAME]
                   [-slurm OPTIONS | -sge OPTIONS]
 
-Build directories and config files for Virtual Screening (4th stage)
+    Build directories and config files for Virtual Screening (4th stage)
 
-optional arguments:
-  -h, --help            show this help message and exit
-  -l FILE               ligand file: .csv (default: compounds.csv)
-  -r FILE               target file(s): .csv (default: targets.csv)
-  -f FILE               config file: .ini
-  -level INT            Level of screening considered. 0: few compounds; 1:
-                        intermediate number of compounds, 2: large number of
-                        compounds
-  -nligands-per-job INT
-                        Number of ligands to be run for every submitted job
-                        (when level of VS is 1 or 2))
-  -s FILE               csvfile with binding sites: .csv (default: sites.csv)
-  -w DIRECTORY NAME     name of directory created for virtual screening
-  -slurm OPTIONS        Options for Slurm Workload Manager
-  -sge OPTIONS          Options for Sun Grid Engine
+    optional arguments:
+      -h, --help            show this help message and exit
+      -l FILE               ligand file: .csv (default: compounds.csv)
+      -r FILE               target file(s): .csv (default: targets.csv)
+      -f FILE               config file: .ini
+      -level INT            Level of screening considered. 0: few compounds; 1:
+                            intermediate number of compounds, 2: large number of
+                            compounds
+      -nligands-per-job INT
+                            Number of ligands to be run for every submitted job
+                            (when level of VS is 1 or 2))
+      -s FILE               csvfile with binding sites: .csv (default: sites.csv)
+      -w DIRECTORY NAME     name of directory created for virtual screening
+      -slurm OPTIONS        Options for Slurm Workload Manager
+      -sge OPTIONS          Options for Sun Grid Engine
 
 
-level
+* Examples
+
+Excluding specific nodes with sge: prepare_vs -l compounds_1000.csv -level 1 -sge N,vs,l,h=!sl390lin22 -f config.ini -nligands-per-job 400
 
