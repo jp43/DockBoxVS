@@ -4,6 +4,8 @@ DockBox VS
 
 A plugin to perform VS with DockBoX (DBX)
 
+prepare_vs
+**********
 
 prepare_vs creates a directory for vs with all the scripts needed to be run 
 
@@ -13,7 +15,7 @@ Levels of screening with prepare_vs (-level option):
 is too large (> 1000), subdirectories will be created. For example if this number is 300k, ligand with ligID:lig230134 will
 be docked on target target002 in the directory vs/lig230000-lig231000/lig230134/target002 (assuming -w option is not modified).
 
-N.B.: The maximum of folders per subdirectory is 1000 while no more than one layer of directories is allowed. Thus the maximum
+**N.B.**: The maximum of folders per subdirectory is 1000 while no more than one layer of directories is allowed. Thus the maximum
 of ligands allowed for levels 0 or 1 is 1M = 1000*1000. Level 0 and 1 do not remove files subsequent to docking. Hence, all the
 binding poses as well as their scores and rescores (in case of rescoring) will be kept, consistently with the options provided in
 the DBX configuration file.
