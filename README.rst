@@ -60,7 +60,11 @@ simulations will be run in the same folder. Only the score of the best pose (no 
       -sge OPTIONS          Options for Sun Grid Engine
 
 
-* Examples
+* **Examples**
 
-Excluding specific nodes with sge: prepare_vs -l compounds_1000.csv -level 1 -sge N,vs,l,h=!sl390lin22 -f config.ini -nligands-per-job 400
+* Excluding specific nodes with sge:
+
+::
+    prepare_vs -l compounds.csv -level 1 -sge N,vs,l,'h=!sl390lin22' -f config.ini -nligands-per-job 400
+
 
