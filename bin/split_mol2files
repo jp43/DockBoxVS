@@ -49,6 +49,9 @@ def split_mol2file(output_file, input_file, index=None):
                     ff.close()
                     filename = None
                     save_structure = False
+                else:
+                    filename = None
+                    save_structure = False
                 if save_structure:
                     ff = open(filename, 'w')
                     ff.write(line)

@@ -1,3 +1,6 @@
+import sys
+import shlex
+
 known_schedulers = {'sge': 'Sun Grid Engine', 'slurm': 'Slurm Workload Manager'}
 exes = {'sge': 'qsub', 'slurm': 'sbatch'}
 
@@ -52,7 +55,11 @@ def slurm_to_seconds(string):
 
 def check_scheduler_options(string, scheduler):
 
-    options = string.split(',')
+    options = shlex.shlex(string, posix=True)
+    options.whitespace += ','
+    options.whitespace_split = True
+
+    options = list(options)
     noptions = len(options)/2
     if len(options) != 2*noptions:
         raise IOError('Number of options provided for th scheduler should be even!')
@@ -72,7 +79,6 @@ def check_scheduler_options(string, scheduler):
     for mo in mandatory_options[scheduler]:
         if mo not in options_dict.keys():
             raise ValueError('Option %s mandatory for %s scheduler is not provided'%(mo,scheduler))
-
     return options_dict
 
 def make_header(options, scheduler, jobname=None, output=None, error=None):
