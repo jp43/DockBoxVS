@@ -223,6 +223,27 @@ class PrepareVS(object):
             njobs += 1
         return njobs, 0, ""
 
+    def get_extract_lines_lvl2(self, ligid, targetid, sites, basename):
+        lines = ""
+        for idx in range(len(sites)):
+            dockdir = basename+sites[idx]
+            jdx = idx + 1
+            lines += """\n  if [[ -f %(dockdir)s/score.out && -f %(dockdir)s/pose-1.mol2 ]]; then
+    nposes=`echo %(dockdir)s/pose-*.mol2 | wc -w`
+    nscores=`cat %(dockdir)s/score.out | wc -l`
+    if [ $nposes -eq $nscores ]; then
+      is_result_site%(jdx)s=true
+      idx=0
+      for file in `ls -v %(dockdir)s/pose-*.mol2`; do
+        idx=$((idx+1))
+        score=`sed "${idx}q;d" %(dockdir)s/score.out`
+        echo "%(ligid)s,%(targetid)s,$score,%(jdx)s" >> scores.dat
+        cat $file >> poses.mol2
+      done
+    fi
+  fi\n"""%locals()
+        return lines
+
     def write_job_scripts(self, vsdir, iterator_l, nligands, input_files_r, targetids, config_files, level, nligands_per_job=None):
         """Write all the scripts needed"""
         # initialize all variables
@@ -240,13 +261,10 @@ class PrepareVS(object):
             if len(sites) > 1: basename += '.'
 
             extract_lines_1 = ""
-            extract_lines_2 = ""
             for idx in range(len(sites)):
                 dockdir = basename+sites[idx]
                 jdx = idx + 1
-                extract_lines_1 += "\nscore_%i="%jdx
-                extract_lines_2 += "\n  if [[ -f %(dockdir)s/score.out && -f %(dockdir)s/pose-1.mol2 ]]; then\n    \
-score_%(jdx)s=`cat %(dockdir)s/score.out`;\n    cat %(dockdir)s/pose-1.mol2 >> poses.mol2;\n  fi"%locals()
+                extract_lines_1 += "\nis_result_site%i=false"%jdx
 
         # create directory which contains scripts to be submitted
         submit_dir = 'to_submit_' + vsdir
@@ -334,10 +352,11 @@ done\n"""%locals()
                         cf = config_files_rel[idx]
                         rf = input_files_r_rel[idx]
 
+                        extract_lines_2 = self.get_extract_lines_lvl2(ligid, targetid, sites, basename)
                         extract_lines_3 = ""
                         for kdx in range(len(sites)):
                             ldx = kdx + 1
-                            extract_lines_3 += "\necho \"%(ligid)s,%(targetid)s,$score_%(ldx)i,%(ldx)i\" >> scores.dat"%locals()
+                            extract_lines_3 += "\nif [ \"$is_result_site%(ldx)i\" = false ]; then\n  echo \"%(ligid)s,%(targetid)s,,%(ldx)i\" >> scores.dat\nfi"%locals()
                         script += """\n\n%(mol2cmd)s%(extract_lines_1)s
 if [ -f ligand.mol2 ]; then
   cp %(cf)s config.ini
@@ -345,6 +364,7 @@ if [ -f ligand.mol2 ]; then
   rundbx -f config.ini -l ligand.mol2 -r target.pdb%(extract_lines_2)s
 fi%(extract_lines_3)s
 rm -rf config.ini ligand.mol2 target.pdb %(program)s* poses\n"""%locals()
+
                     # check if job script should be written
                     if ligand_jdx_abs%nligands_per_job == 0 or ligand_jdx_abs == nligands:
                         jobidx += 1
