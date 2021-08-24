@@ -138,7 +138,7 @@ def check_config_file_lvl2(model):
     if len(programs) != 1:
         sys.exit("Only one docking program with level 2 of VS!")
 
-def is_rescoring(config_file):
+def check_rescoring(config_file):
     # check config file
     config = ConfigParser.SafeConfigParser()
     config.read(config_file)
@@ -156,7 +156,7 @@ def get_programs(config_file, is_rescoring=False, nprograms=None):
     config = ConfigParser.SafeConfigParser()
     config.read(config_file)
     section = is_rescoring*'RESCORING'+(not is_rescoring)*'DOCKING'
-    programs = config.get(section, 'program').split(',')
+    programs = map(str.strip, config.get(section, 'program').split(','))
     if nprograms is not None and len(programs) != nprograms:
         raise ValueError("Number of programs should be equal to %i!"%nprograms)
     return programs
@@ -262,7 +262,7 @@ class PrepareVS(object):
 
             extract_lines_1 = ""
             for idx in range(len(sites)):
-                dockdir = basename+sites[idx]
+                dockdir = basename + sites[idx]
                 jdx = idx + 1
                 extract_lines_1 += "\nis_result_site%i=false"%jdx
 
@@ -270,35 +270,40 @@ class PrepareVS(object):
         submit_dir = 'to_submit_' + vsdir
         create_directory(submit_dir, overwrite=True)
 
+        input_files_r_rel = []
+        for file_r in input_files_r:
+            input_files_r_rel.append(os.path.abspath(file_r))
+
+        config_files_rel = []
+        for file_c in config_files:
+            config_files_rel.append(os.path.abspath(file_c))
+
+
         # iterate over all compounds
         for chunk in iterator_l:
             input_files_l = map(lambda x: os.path.abspath(x), list(chunk.file_origin))
 
             input_files_l_indices = list(chunk['index_file'])
             ligand_ids = list(chunk['ligID'])
-    
+
+            if 'targetID' in chunk:
+                targetids_chunk = [[(targetids.index(targetid), targetid)] for targetid in list(chunk['targetID'])]
+            else:
+                targetids_chunk = [[(kdx, targetid) for kdx, targetid in enumerate(targetids)] for jdx in range(len(ligand_ids))]
+
             for jdx, ligid in enumerate(ligand_ids):
                 ligand_jdx_abs += 1
+                input_file_l_rel = os.path.abspath(input_files_l[jdx])
 
                 # if VS level is 0 or 1, create a subdirectory per (ligand, target) pair
                 if level in [0, 1] or level is None:
                     subdir = vsdir
                     for layer_idx in range(nlayers, 0, -1):
                         subdir += utils.get_subdir_from_ligid(ligid, nligands, self.nfolders_per_layer, layer_idx=layer_idx)
-                    for idx, targetid in enumerate(targetids):
-                        workdir = subdir + '/' + ligid + '/' + targetid
-                        if idx == 0:
-                            input_file_l_rel = os.path.abspath(input_files_l[jdx])
-    
-                        if ligand_jdx_abs == 1 and idx == 0:
-                            input_files_r_rel = []
-                            for file_r in input_files_r:
-                                input_files_r_rel.append(os.path.abspath(file_r))
-    
-                            config_files_rel = []
-                            for file_c in config_files:
-                                config_files_rel.append(os.path.abspath(file_c))
 
+                    for idx, targetid in targetids_chunk[jdx]:
+                        workdir = subdir + '/' + ligid + '/' + targetid
+    
                         os.makedirs(workdir) # make directory
                         script = ""
                         if level == 0:
@@ -420,16 +425,19 @@ for dir in %(vsdir)s/job*; do
   cd $curdir
 done"""%locals())
 
-    def write_logfile(self, filename, csvfile_l, csvfile_r, csvfile_s, config_file, level):
+    def write_logfile(self, filename, csvfile_l, csvfile_r, csvfile_s, config_file, level, nligands_per_job=None):
 
-        with open(filename, 'w') as logf:
-            script = """# Virtual screening logfile
-
+        script = """# Virtual screening logfile
 # configuration file: %(config_file)s
 # ligand file: %(csvfile_l)s
 # receptor file: %(csvfile_r)s
 # sites file: %(csvfile_s)s
-# screening level: %(level)s"""%locals()
+# screening level: %(level)s\n"""%locals()
+
+        if nligands_per_job is not None:
+            script += "# number of ligands per job: %i\n"%nligands_per_job
+
+        with open(filename, 'w') as logf:
             logf.write(script)
 
     def prepare_scripts(self, workdir, csvfile_l, csvfile_r, csvfile_s, config_file, level, nligands_per_job=None):
@@ -537,7 +545,8 @@ done"""%locals())
 nligands_per_job=args.nligands_per_job)
 
         # write .log file
-        self.write_logfile("config_%s.log"%args.vsdir, args.csvfile_l, args.csvfile_r, args.csvfile_s, args.config_file, args.vs_level)
+        self.write_logfile("config_%s.log"%args.vsdir, args.csvfile_l, args.csvfile_r, args.csvfile_s, args.config_file, args.vs_level, \
+nligands_per_job=args.nligands_per_job)
 
 class CheckVS(PrepareVS):
 
@@ -545,12 +554,6 @@ class CheckVS(PrepareVS):
         #TODO: add the possibilty to prepare scripts for torque and ll
         parser = argparse.ArgumentParser(description="Check VS and possibly rebuild folders for unfinished ligands!")
 
-        parser.add_argument('--extract',
-            dest='extract',
-            action='store_true',
-            default=False,
-            help='Extract results!')
-       
         parser.add_argument('-log',
             type=str,
             dest='logfile',
@@ -603,31 +606,33 @@ class CheckVS(PrepareVS):
                 line_st = line.strip()
                 if line_st.startswith("#"):
                     line_st_sp = line_st[1:].strip().split(":")
+
                     if len(line_st_sp) == 2:
                         ft = line_st_sp[0].strip()
                         value = line_st_sp[1].strip()
+
                         if ft == ft_name:
                             return ftype(value)
         sys.exit("Parameter matching description '%s' not found"%ft_name)
 
-    def check_results(self, vsdir, csvfile_l, csvfile_r, config_file, level, extract=False):
+    def check_results(self, vsdir, csvfile_l, csvfile_r, config_file, level, nligands_per_job=None):
         """Check results from previous screening simulations"""
 
-        if extract:
-            results_dir = 'results'
-            shutil.rmtree(results_dir, ignore_errors=True)
-            os.mkdir(results_dir)
-        
         # check how many targets per ligand
-        ntargets_per_ligands = len(pd.read_csv(csvfile_r))
+        ntargets = len(pd.read_csv(csvfile_r))
+        nligands = len(pd.read_csv(csvfile_l))
 
         if level == 1:
             # extract info about ligands and targets from csvfile
-            nligands = len(pd.read_csv(csvfile_l))
             targetID = pd.read_csv(csvfile_r).iloc[-1]['targetID']
 
-            # directory that should be checked
-            to_be_checked = 'rescoring/dsx.score'
+
+            is_rescoring = check_rescoring(config_file)
+            programs = get_programs(config_file, is_rescoring=is_rescoring)
+            if is_rescoring:
+                to_be_checked = 'rescoring/%s.score'%programs[-1]
+            else:
+                to_be_checked = 'poses/info.dat'
 
             nlayers = 0
             # count up how many layers
@@ -638,19 +643,28 @@ class CheckVS(PrepareVS):
             nlayers = nlayers - 1
 
             # get subdir names
-            subdirs = subprocess.check_output('echo '+vsdir+nlayers*'/lig*', shell=True).split()
-            #subdirs = subdirs[:2]
+            subdirs = subprocess.check_output('echo ' + vsdir + nlayers*'/lig*', shell=True).split()
 
+            # check how many targets per job
+            dirs = subprocess.check_output('echo %s/lig* | wc -w'%subdirs[0], shell=True).split()
+            ntargets = int(subprocess.check_output('echo %s/target* | wc -w'%dirs[0], shell=True))
+            
             nligands_done = 0
             dirs_undone = []
 
+            print len(subdirs)
             for idx, subdir in enumerate(subdirs):
-                dirs_done =  subprocess.check_output('echo %s/lig*/%s/%s '%(subdir, targetID, to_be_checked), shell=True).split()
+                #print 'echo %s/lig*/%s/%s '%(subdir, targetID, to_be_checked)
+                if ntargets == 1:
+                    dirs_done =  subprocess.check_output('echo %s/lig*/target*/%s '%(subdir, to_be_checked), shell=True).split()
+                else:
+                    dirs_done =  subprocess.check_output('echo %s/lig*/%s/%s '%(subdir, targetID, to_be_checked), shell=True).split()
                 dirs = subprocess.check_output('echo %s/lig*'%subdir, shell=True).split()
 
                 dirs_done = ['/'.join(dir.split('/')[:-len(to_be_checked.split("/"))-1]) for dir in dirs_done]
                 dirs_undone.extend(list(set(dirs) - set(dirs_done)))
                 nligands_done += len(dirs_done)
+                print subdir, nligands_done
 
             # Print info on ligands
             print "Percentage of ligands done: %.2f%% (of %i)"%(nligands_done*100./nligands, nligands)
@@ -660,85 +674,28 @@ class CheckVS(PrepareVS):
 
         elif level == 2:
             programs = get_programs(config_file, is_rescoring=False)
+            jobdirs = sorted(glob(vsdir+"/job*"))
+            njobs = len(jobdirs)
 
-            results_csv = "%s/scores.csv"%results_dir
-            score_files = ['%s/job*/scores.dat'%vsdir for vsdir in vsdirs]
-            score_files = ' '.join(score_files)
+            nlines_per_job = nligands_per_job*ntargets
+            nlines_per_job_last = (nligands - nligands_per_job*(njobs-1))*ntargets
 
-            # create array with files
-            merge_csvfiles_lines = """files=%(score_files)s
-first=`echo $files | head -n1 | awk '{print $1;}'`
-head -n 1 $first > %(results_csv)s
-for f in $files; do
-  sed 1d $f >> %(results_csv)s
-done
-head -1 %(results_csv)s > tmp.csv
-sed 1d %(results_csv)s | sort >> tmp.csv
-mv tmp.csv %(results_csv)s\n"""%locals()
-            subprocess.check_call(merge_csvfiles_lines, shell=True)
-            # extract info about ligands from csvfile
-            info_l = pd.read_csv(csvfile_l)
-            nligands = len(info_l)
-
-            # extract results on ligands
-            df = pd.read_csv(results_csv)
-            nligands_done = len(df)
-
-            # Print info on ligands
-            print "Percentage of ligands done: %.2f%% (of %i)"%(nligands_done*100./nligands/ntargets_per_ligands, nligands)
-            print "%i compounds remaining!"%(nligands-nligands_done/ntargets_per_ligands)
-
-            ntops = min(ntops, nligands_done)
-            df_groupby = df.groupby('ligID')
-
-            for prgm in programs:
-                df_best_score = df_groupby[prgm].idxmin()
-                df_best_score_na = df_best_score.isnull()
-
-                df_failed = pd.DataFrame(df_best_score_na[df_best_score_na].index)
-
-                df_no_failed = df.loc[df_best_score[~df_best_score_na]]
-                df_no_failed = df_no_failed.reset_index(drop=True)
-
-                # save done ligands
-                merged_no_failed = pd.merge(info_l, df_no_failed, on='ligID', how='right')
-                merged_no_failed.to_csv("%s/ligands_%s.csv"%(results_dir,prgm), index=False)
-                merged_no_failed_smallest = merged_no_failed.nsmallest(ntops, prgm)
-
-                # get all the files with poses 
-                filenames = []
-                for vsdir in vsdirs:
-                    filenames.extend(sorted(list(glob('%s/job*/poses.mol2'%vsdir))))
-
-                poses = {}
-                top_ligands = list(merged_no_failed_smallest['name'].values)
-                # collect poses if they exist
-                for mol2file in filenames:
-                    with open(mol2file, 'r') as mol2f:
-                        for line in mol2f:
-                            if line.startswith("@<TRIPOS>MOLECULE"):
-                                name = mol2f.next().strip()
-                                if name in top_ligands:
-                                    poses[name] = []
-                                    poses[name].append(line)
-                                    poses[name].append(name+'\n')
-                                    keep_molecule = True
-                                else:
-                                    keep_molecule = False
-                            elif keep_molecule:
-                                poses[name].append(line)
-
-                merged_no_failed_smallest.to_csv("%s/scores_%s_top_%i.csv"%(results_dir, prgm, ntops), index=False)
-                # save failed compounds
-                merged_failed = pd.merge(info_l, df_failed, on='ligID', how='right')
-                merged_failed.to_csv("%s/ligands_failed_%s.csv"%(results_dir, prgm), index=False)
-
-            merged = pd.merge(info_l, df, on='ligID', how='left', indicator=True)
-            undone_ligands = info_l[merged['_merge']=='left_only']
-
-            undone_csv = "%s/ligands_undone.csv"%results_dir
-            undone_ligands.to_csv(undone_csv, index=False)
-            return undone_csv
+            nligands_done = 0
+            dirs_undone = []
+            for idx, jobdir in enumerate(jobdirs):
+                if os.path.isfile(jobdir+"/scores.dat"):
+                    nlines = subprocess.check_output("cat "+ jobdir+"/scores.dat | wc -l", shell=True)
+                    nlines = int(nlines) - 1
+                    if (idx != njobs - 1 and nlines != nlines_per_job) or (idx == njobs - 1 and nlines != nlines_per_job_last):
+                        dirs_undone.append(jobdir)
+                    nligands_done += nlines 
+                else:
+                    dirs_undone.append(jobdir)
+ 
+            print "Percentage of ligands done: %.2f%% (of %i)"%(nligands_done*100./(nligands*ntargets), nligands)
+            print "%i compounds remaining!"%((nligands*ntargets-nligands_done)/ntargets)
+            nligands_undone = len(dirs_undone)
+            return sorted(dirs_undone)
 
     def prepare_scripts_undone_jobs(self, dirs, vsdir, level, nligands_per_job):
 
@@ -786,7 +743,11 @@ done\n"""%locals()
 
         # VS level
         level = self.extract_from_logfile(logfile, 'screening level', ftype=int) 
-        dirs_undone = self.check_results(args.vsdir, csvfile_l, csvfile_r, config_file, level, extract=args.extract)
+        if level == 2:
+            nligands_per_job = self.extract_from_logfile(logfile, 'number of ligands per job', ftype=int)
+        else:
+            nligands_per_job = None
+        dirs_undone = self.check_results(args.vsdir, csvfile_l, csvfile_r, config_file, level, nligands_per_job=nligands_per_job)
 
         if args.resume:
             self.set_scheduler(args, level)

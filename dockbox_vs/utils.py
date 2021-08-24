@@ -15,8 +15,8 @@ def get_number_of_compounds(file_l):
     return nligs
 
 def prepare_mol2_command(file_l, index=None):
-
     suffix, ext = os.path.splitext(file_l)
+
     for fmt in known_formats:
         if ext == fmt:
             input_format_flag = '-i' + ext[1:]
